@@ -12,6 +12,7 @@ const RYUU_TIMEOUT_SECS: u64 = 30;
 // ---------------------------------------------------------------------------
 
 /// Result of a provider availability check.
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderAvailability {
     pub provider_id: String,
@@ -20,6 +21,7 @@ pub struct ProviderAvailability {
     pub file_count: u32,
     pub total_size: u64,
     pub detail: Option<String>,
+    pub usage: Option<hubcap::HubcapUsageStats>,
 }
 
 /// Trait for provider adapters that can check availability and download.
@@ -46,6 +48,17 @@ impl ProviderAdapter for HubcapDBAdapter {
 
     fn check_availability(&self, app_id: &str) -> ProviderAvailability {
         let result = hubcap::check_availability(app_id);
+
+        let usage = match hubcap::get_user_stats() {
+            Ok(stats) => Some(stats),
+
+            Err(error) => {
+                eprintln!("[HUBCAP] Usage statistics unavailable: {error}");
+
+                None
+            }
+        };
+
         ProviderAvailability {
             provider_id: "hubcapdb".to_string(),
             name: self.name().to_string(),
@@ -53,6 +66,7 @@ impl ProviderAdapter for HubcapDBAdapter {
             file_count: result.file_count,
             total_size: result.total_size,
             detail: result.detail,
+            usage,
         }
     }
 }
@@ -102,6 +116,7 @@ impl ProviderAdapter for RyuuAdapter {
             provider_id: "ryuu".to_string(),
             name: self.name().to_string(),
             available: false,
+            usage: None,
             file_count: 0,
             total_size: 0,
             detail: Some(detail.to_string()),
@@ -195,6 +210,7 @@ pub fn check_sources_availability(app_id: &str) -> Vec<ProviderAvailability> {
                 name: provider_id.clone(),
                 available: false,
                 file_count: 0,
+                usage: None,
                 total_size: 0,
                 detail: Some("No adapter available".to_string()),
             }
@@ -610,6 +626,7 @@ mod tests {
             available: true,
             file_count: 5,
             total_size: 1024,
+            usage: None,
             detail: None,
         };
         let json = serde_json::to_string(&pa).unwrap();

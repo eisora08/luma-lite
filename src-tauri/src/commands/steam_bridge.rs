@@ -813,6 +813,7 @@ fn route_request(request: &str) -> (&'static str, String, String, RouteAction) {
                         "files": availability.file_count,
                         "total": availability.total_size,
                         "detail": availability.detail,
+                        "usage": availability.usage,
                     })
                 })
                 .collect();

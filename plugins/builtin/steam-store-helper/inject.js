@@ -219,6 +219,86 @@
     return null;
   }
 
+  function formatFileSize(bytes) {
+    var numericBytes = Number(bytes);
+
+    if (
+      !Number.isFinite(numericBytes) ||
+      numericBytes <= 0
+    ) {
+      return null;
+    }
+
+    var units = ['B', 'KB', 'MB', 'GB'];
+    var unitIndex = 0;
+    var value = numericBytes;
+
+    while (
+      value >= 1024 &&
+      unitIndex < units.length - 1
+    ) {
+      value /= 1024;
+      unitIndex++;
+    }
+
+    var decimals = value >= 100 || unitIndex === 0 ? 0 : 1;
+
+    return (
+      value.toFixed(decimals) +
+      ' ' +
+      units[unitIndex]
+    );
+  }
+  function formatTimeRemaining(expiresAt, serverTimestamp) {
+    if (!expiresAt) {
+      return null;
+    }
+
+    var expirationTime = Date.parse(expiresAt);
+
+    if (!Number.isFinite(expirationTime)) {
+      return null;
+    }
+
+    var referenceTime = serverTimestamp
+      ? Date.parse(serverTimestamp)
+      : Date.now();
+
+    if (!Number.isFinite(referenceTime)) {
+      referenceTime = Date.now();
+    }
+
+    var remainingMs =
+      expirationTime - referenceTime;
+
+    if (remainingMs <= 0) {
+      return 'Expired';
+    }
+
+    var totalHours = Math.floor(
+      remainingMs / (1000 * 60 * 60)
+    );
+
+    var days = Math.floor(totalHours / 24);
+    var hours = totalHours % 24;
+
+    if (days > 0) {
+      return days + 'd ' + hours + 'h';
+    }
+
+    if (hours > 0) {
+      return hours + 'h';
+    }
+
+    var minutes = Math.max(
+      1,
+      Math.floor(
+        remainingMs / (1000 * 60)
+      )
+    );
+
+    return minutes + 'm';
+  }
   function bridgeUrl(path) {
     return BRIDGE_SCHEME + '://' + BRIDGE_HOST + ':' + BRIDGE_PORT + path;
   }
@@ -999,18 +1079,102 @@
         var detail = document.createElement('div');
         detail.setAttribute('style', ST.cardDetail);
         if (avail) {
-          var fileText = (src.files || 0) + ' file' + ((src.files || 0) !== 1 ? 's' : '');
-          detail.textContent = 'Ready to download \u2022 ' + fileText;
+          var packageSize = formatFileSize(
+            src.total || src.packageSize || 0
+          );
+
+          if (packageSize) {
+            detail.textContent =
+              'Package available \u2022 ' + packageSize;
+          } else {
+            detail.textContent = 'Package available';
+          }
         } else {
-          detail.textContent = src.detail || 'Not available';
+          detail.textContent =
+            src.detail || 'Not available';
         }
         info.appendChild(name);
         info.appendChild(detail);
+        var usage = src.usage || null;
 
+        if (usage) {
+          var usageParts = [];
+
+          var remainingToday = Number(
+            usage.remaining_today != null
+              ? usage.remaining_today
+              : usage.remainingToday
+          );
+
+          var dailyLimit = Number(
+            usage.daily_limit != null
+              ? usage.daily_limit
+              : usage.dailyLimit
+          );
+
+          var expiresAt =
+            usage.api_key_expires_at ||
+            usage.apiKeyExpiresAt ||
+            null;
+
+          var serverTimestamp =
+            usage.timestamp || null;
+
+          if (
+            Number.isFinite(remainingToday) &&
+            Number.isFinite(dailyLimit) &&
+            dailyLimit > 0
+          ) {
+            usageParts.push(
+              remainingToday +
+              '/' +
+              dailyLimit +
+              ' downloads left'
+            );
+          }
+
+          var expirationText = formatTimeRemaining(
+            expiresAt,
+            serverTimestamp
+          );
+
+          if (expirationText) {
+            usageParts.push(
+              expirationText === 'Expired'
+                ? 'API key expired'
+                : 'Key: ' + expirationText
+            );
+          }
+
+          if (usage.can_make_requests === false) {
+            usageParts.push('Requests unavailable');
+          }
+
+          if (usageParts.length > 0) {
+            var usageDetail = document.createElement('div');
+
+            usageDetail.setAttribute(
+              'style',
+              'display:flex;' +
+              'align-items:center;' +
+              'gap:6px;' +
+              'flex-wrap:wrap;' +
+              'margin-top:5px;' +
+              'font-size:10px;' +
+              'font-weight:600;' +
+              'color:#66c0f4;'
+            );
+
+            usageDetail.textContent =
+              usageParts.join(' \u2022 ');
+
+            info.appendChild(usageDetail);
+          }
+        }
         var badge = document.createElement('div');
         badge.setAttribute('style', avail ? ST.badgeAvail : ST.badgeUnavail);
         badge.innerHTML = avail
-          ? dot('green') + '<span>Ready</span>'
+          ? dot('green') + '<span>Available</span>'
           : dot('gray') + '<span>Unavailable</span>';
 
         card.appendChild(icon);

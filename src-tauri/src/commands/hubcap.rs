@@ -4,10 +4,11 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
-
+use std::time::{Duration, Instant};
+use serde_json::Value;
 const HUBCAP_BASE_URL: &str = "https://hubcapmanifest.com/api/v1";
 const HUBCAP_TIMEOUT_SECS: u64 = 30;
+const HUBCAP_STATS_CACHE_SECS: u64 = 60;
 const MAX_ZIP_SIZE_BYTES: u64 = 500 * 1024 * 1024; // 500 MB
 const MAX_ZIP_ENTRIES: usize = 10_000;
 const MAX_SINGLE_ENTRY_SIZE: u64 = 200 * 1024 * 1024; // 200 MB
@@ -231,6 +232,158 @@ pub fn save_package_metadata(app_id: &str, metadata: &PackageMetadata) -> Result
     Ok(())
 }
 
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubcapUsageStats {
+    pub daily_usage: u64,
+    pub daily_limit: u64,
+    pub remaining_today: u64,
+    pub api_key_usage_count: u64,
+    pub api_key_expires_at: Option<String>,
+    pub can_make_requests: bool,
+    pub timestamp: Option<String>,
+}
+
+struct CachedHubcapUsageStats {
+    fetched_at: Instant,
+    stats: HubcapUsageStats,
+}
+
+static HUBCAP_STATS_CACHE: Mutex<Option<CachedHubcapUsageStats>> =
+    Mutex::new(None);
+
+
+
+pub fn get_user_stats() -> Result<HubcapUsageStats, String> {
+    {
+        let cache = HUBCAP_STATS_CACHE
+            .lock()
+            .map_err(|_| {
+                "Failed to acquire HubcapDB stats cache."
+                    .to_string()
+            })?;
+
+        if let Some(cached) = cache.as_ref() {
+            if cached.fetched_at.elapsed()
+                < Duration::from_secs(HUBCAP_STATS_CACHE_SECS)
+            {
+                return Ok(cached.stats.clone());
+            }
+        }
+    }
+
+    let api_key = get_api_key().ok_or_else(|| {
+        "No HubcapDB API key configured.".to_string()
+    })?;
+
+    let url = format!("{HUBCAP_BASE_URL}/user/stats");
+    let client = build_client();
+
+    let response = client
+        .get(&url)
+        .header(
+            "Authorization",
+            format!("Bearer {api_key}"),
+        )
+        .send()
+        .map_err(|error| {
+            format!(
+                "HubcapDB user statistics request failed: {error}"
+            )
+        })?;
+
+    let status = response.status();
+
+    if !status.is_success() {
+        return Err(match status.as_u16() {
+            401 => "HubcapDB API key is invalid.".to_string(),
+            403 => {
+                "HubcapDB API access was denied.".to_string()
+            }
+            429 => {
+                "HubcapDB daily request limit was reached."
+                    .to_string()
+            }
+            code => format!(
+                "HubcapDB user statistics returned HTTP {code}."
+            ),
+        });
+    }
+
+    let value: Value = response.json().map_err(|error| {
+        format!(
+            "Failed to parse HubcapDB user statistics: {error}"
+        )
+    })?;
+
+    let daily_usage = value
+        .get("daily_usage")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    let daily_limit = value
+        .get("daily_limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    let remaining_today =
+        daily_limit.saturating_sub(daily_usage);
+
+    let api_key_usage_count = value
+        .get("api_key_usage_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    let api_key_expires_at = value
+        .get("api_key_expires_at")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+
+    let can_make_requests = value
+        .get("can_make_requests")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let timestamp = value
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+
+    let stats = HubcapUsageStats {
+        daily_usage,
+        daily_limit,
+        remaining_today,
+        api_key_usage_count,
+        api_key_expires_at,
+        can_make_requests,
+        timestamp,
+    };
+
+    {
+        let mut cache = HUBCAP_STATS_CACHE
+            .lock()
+            .map_err(|_| {
+                "Failed to update HubcapDB stats cache."
+                    .to_string()
+            })?;
+
+        *cache = Some(CachedHubcapUsageStats {
+            fetched_at: Instant::now(),
+            stats: stats.clone(),
+        });
+    }
+
+    eprintln!(
+        "[HUBCAP] Usage statistics: daily_usage={}, daily_limit={}, remaining_today={}, can_make_requests={}",
+        stats.daily_usage,
+        stats.daily_limit,
+        stats.remaining_today,
+        stats.can_make_requests
+    );
+
+    Ok(stats)
+}
 // ---------------------------------------------------------------------------
 // Availability check
 // ---------------------------------------------------------------------------
