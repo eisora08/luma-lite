@@ -18,12 +18,13 @@ pub struct ProviderAvailability {
     pub provider_id: String,
     pub name: String,
     pub available: bool,
+    pub selectable: bool,
+    pub availability_state: String,
     pub file_count: u32,
     pub total_size: u64,
     pub detail: Option<String>,
     pub usage: Option<hubcap::HubcapUsageStats>,
 }
-
 /// Trait for provider adapters that can check availability and download.
 pub trait ProviderAdapter: Send + Sync {
     fn id(&self) -> &str;
@@ -77,6 +78,12 @@ impl ProviderAdapter for HubcapDBAdapter {
             provider_id: "hubcapdb".to_string(),
             name: self.name().to_string(),
             available: result.available,
+            selectable: result.available,
+            availability_state: if result.available {
+                "available".to_string()
+            } else {
+                "not_found".to_string()
+            },
             file_count: result.file_count,
             total_size: result.total_size,
             detail: result.detail,
@@ -120,20 +127,29 @@ impl ProviderAdapter for RyuuAdapter {
     }
 
     fn check_availability(&self, _app_id: &str) -> ProviderAvailability {
-        let detail = if ryuu_get_api_key().is_some() {
-            "Ryuu does not provide a separate availability endpoint."
-        } else {
-            "No API key configured."
-        };
+        let has_api_key = ryuu_get_api_key().is_some();
 
         ProviderAvailability {
             provider_id: "ryuu".to_string(),
             name: self.name().to_string(),
             available: false,
-            usage: None,
+            selectable: has_api_key,
+            availability_state: if has_api_key {
+                "check_on_download".to_string()
+            } else {
+                "missing_credentials".to_string()
+            },
             file_count: 0,
             total_size: 0,
-            detail: Some(detail.to_string()),
+            detail: Some(
+                if has_api_key {
+                    "Availability will be checked when the download starts."
+                } else {
+                    "No API key configured."
+                }
+                .to_string(),
+            ),
+            usage: None,
         }
     }
 }
@@ -203,9 +219,7 @@ pub fn find_adapter(provider_id: &str) -> Option<&'static Box<dyn ProviderAdapte
 
 /// Check availability for a specific app across all enabled providers.
 /// Returns a list of ProviderAvailability results, one per enabled provider.
-pub fn check_sources_availability(
-    app_id: &str,
-) -> Vec<ProviderAvailability> {
+pub fn check_sources_availability(app_id: &str) -> Vec<ProviderAvailability> {
     let config = crate::config::load_config();
 
     let enabled_providers: Vec<String> = config
@@ -223,26 +237,24 @@ pub fn check_sources_availability(
 
         eprintln!(
             "[PROVIDERS] Checking availability: app_id={}, provider={}",
-            app_id,
-            provider_id
+            app_id, provider_id
         );
 
-        let availability =
-            if let Some(adapter) = find_adapter(provider_id) {
-                adapter.check_availability(app_id)
-            } else {
-                ProviderAvailability {
-                    provider_id: provider_id.clone(),
-                    name: provider_id.clone(),
-                    available: false,
-                    file_count: 0,
-                    total_size: 0,
-                    detail: Some(
-                        "No adapter available".to_string(),
-                    ),
-                    usage: None,
-                }
-            };
+        let availability = if let Some(adapter) = find_adapter(provider_id) {
+            adapter.check_availability(app_id)
+        } else {
+            ProviderAvailability {
+                provider_id: provider_id.clone(),
+                name: provider_id.clone(),
+                available: false,
+                selectable: false,
+                availability_state: "adapter_unavailable".to_string(),
+                file_count: 0,
+                total_size: 0,
+                detail: Some("No adapter available".to_string()),
+                usage: None,
+            }
+        };
 
         eprintln!(
             "[PROVIDERS] Availability completed: app_id={}, provider={}, available={}, elapsed_ms={}",
@@ -661,11 +673,14 @@ mod tests {
             provider_id: "hubcapdb".into(),
             name: "HubcapDB".into(),
             available: true,
+            selectable: true,
+            availability_state: "available".to_string(),
             file_count: 5,
             total_size: 1024,
             usage: None,
             detail: None,
         };
+
         let json = serde_json::to_string(&pa).unwrap();
         assert!(json.contains("hubcapdb"));
         assert!(json.contains("true"));

@@ -803,13 +803,16 @@ fn route_request(request: &str) -> (&'static str, String, String, RouteAction) {
 
             let sources: Vec<serde_json::Value> = availability_results
                 .iter()
-                .filter(|availability| availability.available)
+                .filter(|availability| availability.selectable)
                 .map(|availability| {
                     serde_json::json!({
                         "id": availability.provider_id,
                         "name": availability.name,
-                        "available": true,
-                        "selectable": true,
+
+                    "available": availability.available,
+                    "selectable": availability.selectable,
+                    "availabilityState": availability.availability_state,
+
                         "files": availability.file_count,
                         "total": availability.total_size,
                         "detail": availability.detail,
@@ -820,7 +823,7 @@ fn route_request(request: &str) -> (&'static str, String, String, RouteAction) {
 
             let unavailable_sources: Vec<serde_json::Value> = availability_results
                 .iter()
-                .filter(|availability| !availability.available)
+                .filter(|availability| !availability.selectable)
                 .map(|availability| {
                     serde_json::json!({
                         "id": availability.provider_id,
@@ -828,6 +831,7 @@ fn route_request(request: &str) -> (&'static str, String, String, RouteAction) {
                         "available": false,
                         "selectable": false,
                         "detail": availability.detail,
+                        "availabilityState": availability.availability_state,
                     })
                 })
                 .collect();

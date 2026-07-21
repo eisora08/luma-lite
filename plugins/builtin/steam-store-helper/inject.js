@@ -1,4 +1,4 @@
-// Steam Store Helper — LumaForge Lite CEF injection payload v2.5.0-download-flow
+// Steam Store Helper — LumaForge Lite CEF injection payload v2.5.1-provider-results
 // Runs inside Steam's Chromium Embedded Framework browser context.
 // Self-contained, idempotent, teardown-safe.
 // All critical CSS uses inline styles to bypass Steam's CSP.
@@ -1227,10 +1227,26 @@
       // Conserva aquí el resto actual de renderSources().
       body.innerHTML = '';
       sources.forEach(function (src) {
-        var avail = !!src.available;
+
+
+        var selectable = src.selectable === true;
+        var avail = src.available === true;
+
+        var checkOnDownload =
+          src.availabilityState === 'check_on_download' ||
+          src.availability_state === 'check_on_download';
+
+
 
         var card = document.createElement('div');
-        card.setAttribute('style', avail ? ST.card : ST.card + 'opacity:.45;cursor:default;');
+
+        card.setAttribute(
+          'style',
+          selectable
+            ? ST.card
+            : ST.card + 'opacity:.45;cursor:default;'
+        );
+
         card.setAttribute('data-lumaforge-source-id', src.id);
 
         var icon = document.createElement('div');
@@ -1255,6 +1271,9 @@
           } else {
             detail.textContent = 'Package available';
           }
+        } else if (checkOnDownload && selectable) {
+          detail.textContent =
+            'Select Ryuu to download the package';
         } else {
           detail.textContent =
             src.detail || 'Not available';
@@ -1338,20 +1357,58 @@
           }
         }
         var badge = document.createElement('div');
-        badge.setAttribute('style', avail ? ST.badgeAvail : ST.badgeUnavail);
-        badge.innerHTML = avail
-          ? dot('green') + '<span>Available</span>'
-          : dot('gray') + '<span>Unavailable</span>';
+
+        if (avail) {
+          badge.setAttribute(
+            'style',
+            ST.badgeAvail
+          );
+
+          badge.innerHTML =
+            dot('green') +
+            '<span>Available</span>';
+        } else if (checkOnDownload && selectable) {
+          badge.setAttribute(
+            'style',
+            'display:inline-flex;' +
+            'align-items:center;' +
+            'gap:4px;' +
+            'padding:4px 10px;' +
+            'border-radius:12px;' +
+            'font-size:11px;' +
+            'font-weight:700;' +
+            'white-space:nowrap;' +
+            'flex-shrink:0;' +
+            'background:rgba(102,192,255,.14);' +
+            'color:#66c0ff;' +
+            'box-shadow:0 0 8px rgba(102,192,255,.16);'
+          );
+
+          badge.innerHTML =
+            dot('blue') +
+            '<span>Download</span>';
+        } else {
+          badge.setAttribute(
+            'style',
+            ST.badgeUnavail
+          );
+
+          badge.innerHTML =
+            dot('gray') +
+            '<span>Unavailable</span>';
+        }
 
         card.appendChild(icon);
         card.appendChild(info);
         card.appendChild(badge);
 
-        if (avail) {
+
+        if (selectable) {
           card.addEventListener('click', function () {
             handleSourceClick(card, appId, src.id);
           });
         }
+
 
         body.appendChild(card);
       });
