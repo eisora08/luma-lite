@@ -6,3 +6,4 @@ pub mod providers;
 pub mod steam_bridge;
 pub mod steam_inject;
 pub mod tray;
+pub mod steam_runtime;

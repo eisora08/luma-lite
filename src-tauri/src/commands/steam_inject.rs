@@ -12,6 +12,7 @@ use tungstenite::{connect, Message, WebSocket};
 
 const CEF_DEBUG_PORTS: &[u16] = &[8080, 8081, 8082, 8083, 9222];
 const HTTP_TIMEOUT_SECS: u64 = 3;
+const CEF_DETECTION_TIMEOUT_MS: u64 = 350;
 const WS_RETRY_ATTEMPTS: u32 = 2;
 const LUMA_INJECT_VERSION: &str = "2.5.1-provider-results";
 const TARGET_MONITOR_INTERVAL_MS: u64 = 1500;
@@ -105,6 +106,56 @@ pub fn track_injection(
     );
 }
 
+fn upsert_injected_target(
+    extension_id: &str,
+    target_url: &str,
+    target_id: &str,
+    tab_url: &str,
+    ws_url: Option<String>,
+) {
+    let injected = get_injected();
+
+    if let Some(mut extension) = injected.get_mut(extension_id) {
+        if let Some(target) = extension
+            .injected_targets
+            .iter_mut()
+            .find(|target| target.target_id == target_id)
+        {
+            target.last_url = tab_url.to_string();
+            target.ws_url = ws_url;
+            target.version = LUMA_INJECT_VERSION.to_string();
+            target.last_verified = Some(Instant::now());
+
+            return;
+        }
+
+        extension.injected_targets.push(InjectedTarget {
+            target_id: target_id.to_string(),
+            last_url: tab_url.to_string(),
+            ws_url,
+            script_identifier: None,
+            version: LUMA_INJECT_VERSION.to_string(),
+            last_verified: Some(Instant::now()),
+        });
+
+        return;
+    }
+
+    injected.insert(
+        extension_id.to_string(),
+        InjectedExtension {
+            target_url: target_url.to_string(),
+            injected_targets: vec![InjectedTarget {
+                target_id: target_id.to_string(),
+                last_url: tab_url.to_string(),
+                ws_url,
+                script_identifier: None,
+                version: LUMA_INJECT_VERSION.to_string(),
+                last_verified: Some(Instant::now()),
+            }],
+        },
+    );
+}
 pub fn clear_injection(extension_id: &str) {
     get_injected().remove(extension_id);
 }
@@ -122,14 +173,19 @@ pub fn get_injected_target_ids(extension_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub(crate) fn detect_cef_debug_port() -> Option<u16> {
+fn detect_cef_debug_port_internal(log_result: bool) -> Option<u16> {
     let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_millis(350))
+        .timeout(Duration::from_millis(350))
         .build()
     {
         Ok(client) => client,
+
         Err(error) => {
-            eprintln!("[CEF_INJECT] Failed to create CEF detection client: {error}");
+            if log_result {
+                eprintln!("[CEF_INJECT] Failed to create CEF detection client: {error}");
+            }
+
             return None;
         }
     };
@@ -139,29 +195,46 @@ pub(crate) fn detect_cef_debug_port() -> Option<u16> {
 
         match client.get(&url).send() {
             Ok(response) if response.status().is_success() => {
-                eprintln!("[CEF_INJECT] Detected CEF debugger on port {port}");
+                if log_result {
+                    eprintln!("[CEF_INJECT] Detected CEF debugger on port {port}");
+                }
+
                 return Some(port);
             }
+
             Ok(response) => {
-                eprintln!(
-                    "[CEF_INJECT] Port {port} responded with status {}",
-                    response.status()
-                );
+                if log_result {
+                    eprintln!(
+                        "[CEF_INJECT] Port {port} responded with status {}",
+                        response.status()
+                    );
+                }
             }
+
             Err(_) => {}
         }
     }
 
-    eprintln!(
-        "[CEF_INJECT] No CEF debugger found on common ports: {}",
-        CEF_DEBUG_PORTS
-            .iter()
-            .map(u16::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    if log_result {
+        eprintln!(
+            "[CEF_INJECT] No CEF debugger found on common ports: {}",
+            CEF_DEBUG_PORTS
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     None
+}
+
+pub(crate) fn detect_cef_debug_port() -> Option<u16> {
+    detect_cef_debug_port_internal(true)
+}
+
+pub(crate) fn detect_cef_debug_port_silent() -> Option<u16> {
+    detect_cef_debug_port_internal(false)
 }
 
 fn send_cdp_command(
@@ -251,8 +324,6 @@ fn send_cdp_command(
     }
 }
 
-
-
 fn send_page_reload_and_wait(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
 ) -> Result<Value, String> {
@@ -265,15 +336,11 @@ fn send_page_reload_and_wait(
     });
 
     let serialized = serde_json::to_string(&command)
-        .map_err(|error| {
-            format!("Page.reload serialization failed: {error}")
-        })?;
+        .map_err(|error| format!("Page.reload serialization failed: {error}"))?;
 
     socket
         .send(Message::Text(serialized))
-        .map_err(|error| {
-            format!("Page.reload send failed: {error}")
-        })?;
+        .map_err(|error| format!("Page.reload send failed: {error}"))?;
 
     let mut reload_response: Option<Value> = None;
     let mut load_event_received = false;
@@ -281,95 +348,60 @@ fn send_page_reload_and_wait(
     while reload_response.is_none() || !load_event_received {
         let message = socket
             .read()
-            .map_err(|error| {
-                format!(
-                    "Waiting for Page.reload completion failed: {error}"
-                )
-            })?;
+            .map_err(|error| format!("Waiting for Page.reload completion failed: {error}"))?;
 
         match message {
             Message::Text(text) => {
-                let parsed: Value =
-                    match serde_json::from_str(&text) {
-                        Ok(value) => value,
-                        Err(_) => continue,
-                    };
+                let parsed: Value = match serde_json::from_str(&text) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                };
 
-                if parsed
-                    .get("method")
-                    .and_then(Value::as_str)
-                    == Some("Page.loadEventFired")
-                {
+                if parsed.get("method").and_then(Value::as_str) == Some("Page.loadEventFired") {
                     load_event_received = true;
 
-                    eprintln!(
-                        "[CEF_INJECT] Page.loadEventFired received"
-                    );
+                    eprintln!("[CEF_INJECT] Page.loadEventFired received");
 
                     continue;
                 }
 
-                if let Some(method) =
-                    parsed.get("method").and_then(Value::as_str)
-                {
+                if let Some(method) = parsed.get("method").and_then(Value::as_str) {
                     if method == "Runtime.exceptionThrown" {
-                        eprintln!(
-                            "[CEF_INJECT] Runtime exception event: {}",
-                            parsed
-                        );
+                        eprintln!("[CEF_INJECT] Runtime exception event: {}", parsed);
                     } else if method == "Runtime.consoleAPICalled" {
-                        eprintln!(
-                            "[CEF_CONSOLE] {}",
-                            format_console_event(&parsed)
-                        );
+                        eprintln!("[CEF_CONSOLE] {}", format_console_event(&parsed));
                     }
 
                     continue;
                 }
 
-                if parsed.get("id").and_then(Value::as_u64)
-                    != Some(CDP_ID_PAGE_RELOAD)
-                {
+                if parsed.get("id").and_then(Value::as_u64) != Some(CDP_ID_PAGE_RELOAD) {
                     continue;
                 }
 
                 if let Some(error) = parsed.get("error") {
-                    return Err(format!(
-                        "Page.reload returned a CDP error: {error}"
-                    ));
+                    return Err(format!("Page.reload returned a CDP error: {error}"));
                 }
 
                 reload_response = Some(parsed);
             }
 
             Message::Ping(payload) => {
-                socket
-                    .send(Message::Pong(payload))
-                    .map_err(|error| {
-                        format!(
-                            "Failed to answer WebSocket ping during reload: {error}"
-                        )
-                    })?;
+                socket.send(Message::Pong(payload)).map_err(|error| {
+                    format!("Failed to answer WebSocket ping during reload: {error}")
+                })?;
             }
 
             Message::Close(frame) => {
-                return Err(format!(
-                    "CDP closed during Page.reload: {frame:?}"
-                ));
+                return Err(format!("CDP closed during Page.reload: {frame:?}"));
             }
 
-            Message::Binary(_)
-            | Message::Pong(_)
-            | Message::Frame(_) => {}
+            Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
         }
     }
 
-    reload_response.ok_or_else(|| {
-        "Page.reload completed without a command response."
-            .to_string()
-    })
+    reload_response.ok_or_else(|| "Page.reload completed without a command response.".to_string())
 }
-
 
 fn format_exception_details(command_name: &str, exception: &Value) -> String {
     let text = exception
@@ -437,7 +469,6 @@ fn extract_returned_value(response: &Value) -> Option<&Value> {
     response.pointer("/result/result/value")
 }
 
-
 fn verify_lifecycle_on_socket(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     command_id: u64,
@@ -479,24 +510,13 @@ fn verify_lifecycle_on_socket(
         }
     });
 
-    let response = send_cdp_command(
-        socket,
-        &command,
-        command_id,
-        label,
-    )?;
+    let response = send_cdp_command(socket, &command, command_id, label)?;
 
-    eprintln!(
-        "[CEF_VERIFY] {label} response: {response}"
-    );
+    eprintln!("[CEF_VERIFY] {label} response: {response}");
 
     let value = response
         .pointer("/result/result/value")
-        .ok_or_else(|| {
-            format!(
-                "{label} returned no lifecycle value: {response}"
-            )
-        })?;
+        .ok_or_else(|| format!("{label} returned no lifecycle value: {response}"))?;
 
     let exists = value
         .get("exists")
@@ -657,11 +677,7 @@ struct ConnectReport {
     bridge_error: Option<String>,
 }
 
-fn connect_once(
-    ws_url: &str,
-    js_code: &str,
-    target_id: &str,
-) -> ConnectReport {
+fn connect_once(ws_url: &str, js_code: &str, target_id: &str) -> ConnectReport {
     let mut report = ConnectReport {
         lifecycle_ok: false,
         bridge_ok: false,
@@ -672,8 +688,7 @@ fn connect_once(
     let mut socket = match connect(ws_url) {
         Ok((socket, _)) => socket,
         Err(error) => {
-            report.lifecycle_error =
-                Some(format!("WebSocket connect failed: {error}"));
+            report.lifecycle_error = Some(format!("WebSocket connect failed: {error}"));
 
             return report;
         }
@@ -684,17 +699,9 @@ fn connect_once(
         "method": "Page.enable"
     });
 
-    match send_cdp_command(
-        &mut socket,
-        &page_enable,
-        CDP_ID_PAGE_ENABLE,
-        "Page.enable",
-    ) {
+    match send_cdp_command(&mut socket, &page_enable, CDP_ID_PAGE_ENABLE, "Page.enable") {
         Ok(response) => {
-            eprintln!(
-                "[CEF_INJECT] Page.enable response: {}",
-                response
-            );
+            eprintln!("[CEF_INJECT] Page.enable response: {}", response);
         }
 
         Err(error) => {
@@ -717,10 +724,7 @@ fn connect_once(
         "Runtime.enable",
     ) {
         Ok(response) => {
-            eprintln!(
-                "[CEF_INJECT] Runtime.enable response: {}",
-                response
-            );
+            eprintln!("[CEF_INJECT] Runtime.enable response: {}", response);
         }
 
         Err(error) => {
@@ -746,10 +750,7 @@ fn connect_once(
         "Page.setBypassCSP",
     ) {
         Ok(response) => {
-            eprintln!(
-                "[CEF_INJECT] Page.setBypassCSP response: {}",
-                response
-            );
+            eprintln!("[CEF_INJECT] Page.setBypassCSP response: {}", response);
         }
 
         Err(error) => {
@@ -831,20 +832,12 @@ fn connect_once(
                 inject_response
             );
 
-            if let Some(result_object) =
-                inject_response.pointer("/result/result")
-            {
-                if result_object
-                    .get("subtype")
-                    .and_then(Value::as_str)
-                    == Some("error")
-                {
+            if let Some(result_object) = inject_response.pointer("/result/result") {
+                if result_object.get("subtype").and_then(Value::as_str) == Some("error") {
                     let description = result_object
                         .get("description")
                         .and_then(Value::as_str)
-                        .unwrap_or(
-                            "JavaScript evaluation returned an error",
-                        );
+                        .unwrap_or("JavaScript evaluation returned an error");
 
                     report.lifecycle_error = Some(format!(
                         "Runtime.evaluate returned an error result: {description}"
@@ -885,10 +878,8 @@ fn connect_once(
         }
 
         Ok(false) => {
-            report.lifecycle_error = Some(
-                "Lifecycle did not become active after evaluation."
-                    .to_string(),
-            );
+            report.lifecycle_error =
+                Some("Lifecycle did not become active after evaluation.".to_string());
 
             let _ = socket.close(None);
 
@@ -917,8 +908,7 @@ fn connect_once(
         Err(initial_bridge_error) => {
             eprintln!(
                 "[CEF_INJECT] Initial bridge diagnostic failed for target {}: {}",
-                target_id,
-                initial_bridge_error
+                target_id, initial_bridge_error
             );
 
             eprintln!(
@@ -928,10 +918,7 @@ fn connect_once(
 
             match send_page_reload_and_wait(&mut socket) {
                 Ok(reload_response) => {
-                    eprintln!(
-                        "[CEF_INJECT] Page.reload response: {}",
-                        reload_response
-                    );
+                    eprintln!("[CEF_INJECT] Page.reload response: {}", reload_response);
                 }
 
                 Err(reload_error) => {
@@ -964,10 +951,8 @@ fn connect_once(
                 Ok(false) => {
                     report.lifecycle_ok = false;
 
-                    report.lifecycle_error = Some(
-                        "Lifecycle was not active after the Store reload."
-                            .to_string(),
-                    );
+                    report.lifecycle_error =
+                        Some("Lifecycle was not active after the Store reload.".to_string());
 
                     let _ = socket.close(None);
 
@@ -1624,7 +1609,8 @@ pub fn start_target_monitor(extension_id: String, target_url: String) {
         };
 
         while CEF_MONITOR_RUNNING.load(Ordering::SeqCst) {
-            let debug_port = detect_cef_debug_port();
+            let debug_port = detect_cef_debug_port_silent();
+
             if let Some(port) = debug_port {
                 let endpoint = format!("http://127.0.0.1:{port}/json");
                 if let Ok(resp) = client.get(&endpoint).send() {
@@ -1706,6 +1692,77 @@ pub fn start_target_monitor(extension_id: String, target_url: String) {
                                         "[CEF_MONITOR] New Store target detected: {}",
                                         truncate_url(&tab_id, 40)
                                     );
+
+                                    let Some(ws_url) = tab.web_socket_debugger_url.as_deref()
+                                    else {
+                                        eprintln!(
+            "[CEF_MONITOR] New target has no WebSocket debugger URL: {}",
+            truncate_url(&tab_id, 40)
+        );
+
+                                        continue;
+                                    };
+
+                                    let inject_script = super::plugins::get_plugins_cache()
+                                        .get(&extension_id)
+                                        .and_then(|plugin| plugin.inject_script.clone())
+                                        .unwrap_or_else(|| "inject.js".to_string());
+
+                                    let Some(script_path) = crate::config::resolve_inject_script(
+                                        &extension_id,
+                                        &inject_script,
+                                    ) else {
+                                        eprintln!(
+            "[CEF_MONITOR] Could not resolve inject script for extension '{}'",
+            extension_id
+        );
+
+                                        continue;
+                                    };
+
+                                    let js_code = match std::fs::read_to_string(&script_path) {
+                                        Ok(code) => code,
+
+                                        Err(error) => {
+                                            eprintln!(
+                    "[CEF_MONITOR] Failed to read inject script {}: {error}",
+                    script_path.display()
+                );
+
+                                            continue;
+                                        }
+                                    };
+
+                                    eprintln!(
+        "[CEF_MONITOR] Injecting extension '{}' into new target: {}",
+        extension_id,
+        truncate_url(&tab_id, 40)
+    );
+
+                                    let report = connect_once(ws_url, &js_code, &tab_id);
+
+                                    if report.lifecycle_ok {
+                                        upsert_injected_target(
+                                            &extension_id,
+                                            &target_url,
+                                            &tab_id,
+                                            tab_url,
+                                            tab.web_socket_debugger_url.clone(),
+                                        );
+
+                                        eprintln!(
+                                            "[CEF_MONITOR] New target injection successful: {}",
+                                            truncate_url(&tab_id, 40)
+                                        );
+                                    } else {
+                                        eprintln!(
+                                            "[CEF_MONITOR] New target injection failed for {}: {}",
+                                            truncate_url(&tab_id, 40),
+                                            report.lifecycle_error.unwrap_or_else(|| {
+                                                "Unknown injection error".to_string()
+                                            })
+                                        );
+                                    }
                                 }
                             }
 
@@ -1719,6 +1776,14 @@ pub fn start_target_monitor(extension_id: String, target_url: String) {
                                     "[CEF_MONITOR] Target removed: {}",
                                     truncate_url(stale_id, 40)
                                 );
+                            }
+
+                            if !stale_ids.is_empty() {
+                                if let Some(mut extension) = get_injected().get_mut(&extension_id) {
+                                    extension
+                                        .injected_targets
+                                        .retain(|target| !stale_ids.contains(&target.target_id));
+                                }
                             }
                         }
                     }

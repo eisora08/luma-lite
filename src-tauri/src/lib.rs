@@ -52,22 +52,9 @@ fn re_inject_enabled_extensions(plugins: &[commands::plugins::PluginEntry]) {
 
         match std::fs::read_to_string(&script_path) {
             Ok(js_code) => {
-                // Extract version marker from script content
-                let version_marker = js_code
-                    .lines()
-                    .find(|l| l.contains("LUMA_INJECT_VERSION"))
-                    .and_then(|l| l.split('\'').nth(1).or_else(|| l.split('"').nth(1)))
-                    .unwrap_or("(not found)");
-                eprintln!("[PLUGIN_RUNTIME] Script version marker: {}", version_marker);
-
-                eprintln!(
-                    "[BOOT] Re-injecting '{}' into tabs matching '{}' (script: {})",
-                    plugin.id,
-                    target_url,
-                    script_path.display()
-                );
                 let result =
                     commands::steam_inject::inject_code_into_tabs(&target_url, &js_code, &[]);
+
                 commands::steam_inject::track_injection(
                     &plugin.id,
                     &target_url,
@@ -80,24 +67,27 @@ fn re_inject_enabled_extensions(plugins: &[commands::plugins::PluginEntry]) {
                         .take(result.injected_target_ids.len())
                         .collect::<Vec<_>>(),
                 );
+
                 if result.success {
                     eprintln!(
                         "[BOOT] Injected into {} tab(s) for '{}'",
                         result.injected_tab_urls.len(),
                         plugin.id
                     );
-                    commands::steam_inject::start_target_monitor(plugin.id.clone(), target_url);
-                } else if let Some(ref err) = result.error {
-                    eprintln!("[BOOT] Injection for '{}': {err}", plugin.id);
+                } else if let Some(ref error) = result.error {
+                    eprintln!("[BOOT] Initial injection for '{}': {error}", plugin.id);
                 }
             }
-            Err(e) => {
+
+            Err(error) => {
                 eprintln!(
-                    "[BOOT] Failed to read inject script {}: {e}",
+                    "[BOOT] Failed to read inject script {}: {error}",
                     script_path.display()
                 );
             }
         }
+
+        commands::steam_inject::start_target_monitor(plugin.id.clone(), target_url.clone());
     }
 }
 
@@ -262,6 +252,11 @@ pub fn run() {
             config::set_multi_provider_fallback,
             // Steam bridge
             commands::steam_bridge::get_bridge_status,
+            // Steam runtime
+            commands::steam_runtime::get_steam_runtime_status,
+            commands::steam_runtime::start_steam_with_cef,
+            commands::steam_runtime::restart_steam_with_cef,
+            commands::steam_runtime::request_steam_shutdown,
             // CDP injection
             commands::steam_inject::inject_to_steam_tab,
             commands::steam_inject::inject_plugin_by_id,
