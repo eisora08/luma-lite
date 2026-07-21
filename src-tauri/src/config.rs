@@ -89,7 +89,7 @@ impl ProviderConfig {
             }
             _ => (false, String::new()),
         };
-        let adapter_available = matches!(self.id.as_str(), "hubcapdb");
+        let adapter_available = matches!(self.id.as_str(), "hubcapdb" | "ryuu");
         ProviderConfigPublic {
             id: self.id.clone(),
             name: self.name.clone(),

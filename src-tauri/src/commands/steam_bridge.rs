@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::thread;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
 use super::hubcap;
@@ -10,6 +13,56 @@ const BRIDGE_PORT: u16 = 21775;
 const BRIDGE_ADDR: &str = "127.0.0.1";
 
 static BRIDGE_RUNNING: AtomicBool = AtomicBool::new(false);
+static BRIDGE_READY_FLAG: AtomicBool = AtomicBool::new(false);
+
+// ---------------------------------------------------------------------------
+// Download job tracking
+// ---------------------------------------------------------------------------
+
+struct DownloadJob {
+    request_id: String,
+    app_id: String,
+    provider_id: String,
+    status: String,
+    progress: Option<u32>,
+    message: String,
+    error_code: Option<String>,
+    output_type: Option<String>,
+    started_at: Instant,
+    completed_at: Option<Instant>,
+}
+
+fn job_store() -> &'static Mutex<HashMap<String, DownloadJob>> {
+    static JOBS: OnceLock<Mutex<HashMap<String, DownloadJob>>> = OnceLock::new();
+    JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn generate_request_id() -> String {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let pid = std::process::id();
+    format!("req-{pid}-{ts}")
+}
+
+fn bridge_sync() -> &'static (Mutex<bool>, Condvar) {
+    static SYNC: OnceLock<(Mutex<bool>, Condvar)> = OnceLock::new();
+    SYNC.get_or_init(|| (Mutex::new(false), Condvar::new()))
+}
+
+pub fn wait_until_bridge_ready(timeout_ms: u64) -> bool {
+    if BRIDGE_READY_FLAG.load(Ordering::SeqCst) {
+        return true;
+    }
+    let (lock, cv) = bridge_sync();
+    let ready = lock.lock().unwrap();
+    if *ready {
+        return true;
+    }
+    let _ = cv.wait_timeout(ready, std::time::Duration::from_millis(timeout_ms));
+    BRIDGE_READY_FLAG.load(Ordering::SeqCst)
+}
 
 const MAX_PACKAGE_ID_LENGTH: usize = 12;
 
@@ -55,6 +108,15 @@ pub fn start_steam_bridge(app_handle: tauri::AppHandle) {
 
         let _ = listener.set_nonblocking(true);
 
+        BRIDGE_READY_FLAG.store(true, Ordering::SeqCst);
+        {
+            let (lock, cv) = bridge_sync();
+            let mut ready = lock.lock().unwrap();
+            *ready = true;
+            cv.notify_all();
+        }
+
+        eprintln!("[STEAM_BRIDGE] Ready on http://{addr}");
         eprintln!("[STEAM_BRIDGE] Listening on http://{addr}");
         eprintln!("  Endpoints:");
         eprintln!("    GET  /health");
@@ -65,6 +127,8 @@ pub fn start_steam_bridge(app_handle: tauri::AppHandle) {
         eprintln!("    POST /api/download");
         eprintln!("    POST /api/settings");
         eprintln!("    GET|POST /api/download-package/{{appId}}");
+        eprintln!("    GET  /api/download-status/{{requestId}}");
+        eprintln!("    POST /api/open-library/{{appId}}");
 
         for stream in listener.incoming() {
             match stream {
@@ -112,7 +176,14 @@ fn is_valid_package_id(id: &str) -> bool {
 enum RouteAction {
     None,
     EmitDownloadPackage(String),
-    EmitDownloadHubcap { app_id: String },
+    EmitDownloadProvider {
+        app_id: String,
+        request_id: String,
+        provider_id: String,
+    },
+    OpenLibrary {
+        uri: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -173,42 +244,157 @@ fn handle_request(stream: &mut TcpStream, app_handle: &tauri::AppHandle) {
                 serde_json::json!({ "appId": app_id }),
             );
         }
-        RouteAction::EmitDownloadHubcap { app_id } => {
+        RouteAction::EmitDownloadProvider {
+            app_id,
+            request_id,
+            provider_id,
+        } => {
             let handle = app_handle.clone();
+            let rid = request_id.clone();
+            let pid = provider_id.clone();
             thread::spawn(move || {
+                // Phase: validating
+                {
+                    let mut jobs = job_store().lock().unwrap();
+                    if let Some(job) = jobs.get_mut(&rid) {
+                        job.status = "validating".to_string();
+                        job.message = "Validating package.".to_string();
+                    }
+                }
+                let _ = handle.emit(
+                    "steam-bridge://download-progress",
+                    serde_json::json!({ "appId": app_id, "requestId": rid, "status": "validating" }),
+                );
+
+                // Phase: checking_availability
+                {
+                    let mut jobs = job_store().lock().unwrap();
+                    if let Some(job) = jobs.get_mut(&rid) {
+                        job.status = "checking_availability".to_string();
+                        job.message = "Checking provider availability.".to_string();
+                    }
+                }
+                eprintln!("[DOWNLOADS] Request progress: requestId={rid}, status=checking_availability, provider={pid}");
+                let _ = handle.emit(
+                    "steam-bridge://download-progress",
+                    serde_json::json!({ "appId": app_id, "requestId": rid, "status": "checking_availability" }),
+                );
+
+                // Phase: downloading
+                {
+                    let mut jobs = job_store().lock().unwrap();
+                    if let Some(job) = jobs.get_mut(&rid) {
+                        job.status = "downloading".to_string();
+                        job.message = "Downloading package.".to_string();
+                        job.progress = Some(10);
+                    }
+                }
+                let _ = handle.emit(
+                    "steam-bridge://download-progress",
+                    serde_json::json!({ "appId": app_id, "requestId": rid, "status": "downloading" }),
+                );
+
                 let steam_root = crate::config::resolve_steam_root();
                 let Some(root) = steam_root else {
+                    let mut jobs = job_store().lock().unwrap();
+                    if let Some(job) = jobs.get_mut(&rid) {
+                        job.status = "failed".to_string();
+                        job.error_code = Some("STEAM_ROOT_NOT_FOUND".to_string());
+                        job.message = "Steam root directory not found.".to_string();
+                        job.completed_at = Some(Instant::now());
+                    }
                     let _ = handle.emit(
                         "steam-bridge://download-error",
-                        serde_json::json!({ "appId": app_id, "error": "Steam root not found" }),
+                        serde_json::json!({ "appId": app_id, "requestId": rid, "error": "Steam root not found" }),
                     );
                     return;
                 };
-                let _ = handle.emit(
-                    "steam-bridge://download-progress",
-                    serde_json::json!({ "appId": app_id, "stage": "downloading" }),
-                );
-                match hubcap::download_and_extract(&app_id, &root) {
+
+                let job_output_type = {
+                    let jobs = job_store().lock().unwrap();
+                    jobs.get(&rid).and_then(|j| j.output_type.clone())
+                };
+
+                // Use multi-provider fallback with the selected provider as preferred
+                match super::providers::download_with_fallback(
+                    &app_id,
+                    &pid,
+                    &root,
+                    Some(&rid),
+                    job_output_type.as_deref(),
+                ) {
                     Ok(result) => {
+                        {
+                            let mut jobs = job_store().lock().unwrap();
+                            if let Some(job) = jobs.get_mut(&rid) {
+                                job.status = "extracting".to_string();
+                                job.message = "Extracting package contents.".to_string();
+                                job.progress = Some(75);
+                            }
+                        }
+                        let _ = handle.emit(
+                            "steam-bridge://download-progress",
+                            serde_json::json!({ "appId": app_id, "requestId": rid, "status": "extracting" }),
+                        );
+
+                        {
+                            let mut jobs = job_store().lock().unwrap();
+                            if let Some(job) = jobs.get_mut(&rid) {
+                                job.status = "processing".to_string();
+                                job.message = "Processing package metadata.".to_string();
+                                job.progress = Some(90);
+                            }
+                        }
+                        let _ = handle.emit(
+                            "steam-bridge://download-progress",
+                            serde_json::json!({ "appId": app_id, "requestId": rid, "status": "processing" }),
+                        );
+
+                        {
+                            let mut jobs = job_store().lock().unwrap();
+                            if let Some(job) = jobs.get_mut(&rid) {
+                                job.status = "completed".to_string();
+                                job.progress = Some(100);
+                                job.message = "Package added successfully.".to_string();
+                                job.completed_at = Some(Instant::now());
+                            }
+                        }
+                        eprintln!("[DOWNLOADS] Request completed: requestId={rid}, appId={app_id}, provider={pid}");
                         let _ = handle.emit(
                             "steam-bridge://download-complete",
                             serde_json::json!({
                                 "appId": app_id,
+                                "requestId": rid,
                                 "luaFiles": result.lua_files,
                                 "manifestFiles": result.manifest_files,
                                 "errors": result.errors,
+                                "outputType": job_output_type,
                             }),
                         );
                     }
                     Err(e) => {
-                        eprintln!("[STEAM_BRIDGE] Hubcap download failed for {app_id}: {e}");
+                        let mut jobs = job_store().lock().unwrap();
+                        if let Some(job) = jobs.get_mut(&rid) {
+                            job.status = "failed".to_string();
+                            job.error_code = Some("DOWNLOAD_FAILED".to_string());
+                            job.message = format!("Download failed: {e}");
+                            job.completed_at = Some(Instant::now());
+                        }
+                        eprintln!("[DOWNLOADS] Request failed: requestId={rid}, error={e}");
                         let _ = handle.emit(
                             "steam-bridge://download-error",
-                            serde_json::json!({ "appId": app_id, "error": e }),
+                            serde_json::json!({ "appId": app_id, "requestId": rid, "error": e }),
                         );
                     }
                 }
             });
+        }
+        RouteAction::OpenLibrary { uri } => {
+            #[allow(deprecated)]
+            {
+                use tauri_plugin_shell::ShellExt;
+                let _ = app_handle.shell().open(&uri, None);
+            }
         }
         RouteAction::None => {}
     }
@@ -594,7 +780,7 @@ fn route_request(request: &str) -> (&'static str, String, String, RouteAction) {
         }
     }
 
-    // GET /api/sources/{appId} — return enabled providers for this app
+    // GET /api/sources/{appId} — check real provider availability for this app
     if request.starts_with("GET /api/sources/") {
         if let Some(app_id) = extract_path_param(request, "/api/sources/") {
             if !is_valid_package_id(app_id) {
@@ -611,32 +797,52 @@ fn route_request(request: &str) -> (&'static str, String, String, RouteAction) {
                     RouteAction::None,
                 );
             }
-            eprintln!("[STEAM_BRIDGE] Sources query for AppID: {app_id}");
+            eprintln!("[STEAM_BRIDGE] Sources availability check for AppID: {app_id}");
 
-            let config = crate::config::load_config();
-            let sources: Vec<serde_json::Value> = config
-                .downloads
-                .providers
+            let availability_results = super::providers::check_sources_availability(app_id);
+
+            let sources: Vec<serde_json::Value> = availability_results
                 .iter()
-                .filter(|p| p.enabled)
-                .map(|p| {
-                    let pub_view = p.to_public();
+                .filter(|availability| availability.available)
+                .map(|availability| {
                     serde_json::json!({
-                        "id": pub_view.id,
-                        "name": pub_view.name,
-                        "available": pub_view.adapter_available,
-                        "adapterAvailable": pub_view.adapter_available,
-                        "files": 0u32,
-                        "total": 0u32,
-                        "detail": if pub_view.adapter_available { serde_json::Value::Null } else { serde_json::Value::String("Adapter not yet available".to_string()) },
+                        "id": availability.provider_id,
+                        "name": availability.name,
+                        "available": true,
+                        "selectable": true,
+                        "files": availability.file_count,
+                        "total": availability.total_size,
+                        "detail": availability.detail,
                     })
                 })
                 .collect();
+
+            let unavailable_sources: Vec<serde_json::Value> = availability_results
+                .iter()
+                .filter(|availability| !availability.available)
+                .map(|availability| {
+                    serde_json::json!({
+                        "id": availability.provider_id,
+                        "name": availability.name,
+                        "available": false,
+                        "selectable": false,
+                        "detail": availability.detail,
+                    })
+                })
+                .collect();
+
+            let message = if sources.is_empty() {
+                Some("No package is currently available for this App ID.")
+            } else {
+                None
+            };
 
             let body = serde_json::json!({
                 "ok": true,
                 "appId": app_id,
                 "sources": sources,
+                "unavailableSources": unavailable_sources,
+                "message": message,
             });
             let headers = build_cors_headers(request);
             return (
@@ -648,20 +854,62 @@ fn route_request(request: &str) -> (&'static str, String, String, RouteAction) {
         }
     }
 
-    // POST /api/download — download from a provider (with fallback)
+    // POST /api/download — download from a provider
+    // with fallback, output type, and duplicate protection.
     if request.starts_with("POST /api/download") {
         let body_str = extract_post_body(request);
+
         match serde_json::from_str::<serde_json::Value>(&body_str) {
             Ok(val) => {
-                let app_id = val.get("appId").and_then(|v| v.as_str()).unwrap_or("");
-                let source_id = val.get("sourceId").and_then(|v| v.as_str()).unwrap_or("");
+                let app_id = val
+                    .get("appId")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+
+                let source_id = val
+                    .get("sourceId")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+
+                let output_type = match val
+                    .get("outputType")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("lua+manifest")
+                {
+                    "lua" => "lua".to_string(),
+                    "manifest" => "manifest".to_string(),
+                    "lua+manifest" => "lua+manifest".to_string(),
+
+                    invalid => {
+                        let body = serde_json::json!({
+                            "ok": false,
+                            "code": "INVALID_OUTPUT_TYPE",
+                            "message": format!(
+                                "Unsupported output type '{}'. Expected 'lua', 'manifest', or 'lua+manifest'.",
+                                invalid
+                            ),
+                        });
+
+                        let headers = build_cors_headers(request);
+
+                        return (
+                            "HTTP/1.1 400 Bad Request",
+                            headers,
+                            body.to_string(),
+                            RouteAction::None,
+                        );
+                    }
+                };
+
                 if !is_valid_package_id(app_id) || source_id.is_empty() {
                     let body = serde_json::json!({
                         "ok": false,
                         "code": "INVALID_PARAMETERS",
                         "message": "Requires valid numeric 'appId' and non-empty 'sourceId'.",
                     });
+
                     let headers = build_cors_headers(request);
+
                     return (
                         "HTTP/1.1 400 Bad Request",
                         headers,
@@ -671,69 +919,140 @@ fn route_request(request: &str) -> (&'static str, String, String, RouteAction) {
                 }
 
                 // Normalize legacy "hubcap" to "hubcapdb"
-                let source_id = match source_id {
-                    "hubcap" => "hubcapdb",
-                    other => other,
+                let source_id_normalized = match source_id {
+                    "hubcap" => "hubcapdb".to_string(),
+                    other => other.to_string(),
                 };
 
-                // Only hubcapdb has an adapter
-                if source_id == "hubcapdb" {
-                    eprintln!("[STEAM_BRIDGE] HubcapDB download request appId={app_id}");
-                    let body = serde_json::json!({
-                        "ok": true,
-                        "status": "accepted",
-                        "appId": app_id,
-                        "sourceId": "hubcapdb",
-                        "message": "Download started."
-                    });
-                    let headers = build_cors_headers(request);
-                    return (
-                        "HTTP/1.1 200 OK",
-                        headers,
-                        body.to_string(),
-                        RouteAction::EmitDownloadHubcap {
+                // Validate provider exists and is enabled
+                {
+                    let config = crate::config::load_config();
+                    let provider = config
+                        .downloads
+                        .providers
+                        .iter()
+                        .find(|p| p.id == source_id_normalized);
+                    match provider {
+                        None => {
+                            let body = serde_json::json!({
+                                "ok": false,
+                                "code": "SOURCE_DISABLED",
+                                "message": format!("Provider '{source_id_normalized}' is not enabled in settings."),
+                            });
+                            let headers = build_cors_headers(request);
+                            return (
+                                "HTTP/1.1 400 Bad Request",
+                                headers,
+                                body.to_string(),
+                                RouteAction::None,
+                            );
+                        }
+                        Some(p) if !p.enabled => {
+                            let body = serde_json::json!({
+                                "ok": false,
+                                "code": "SOURCE_DISABLED",
+                                "message": format!("Provider '{}' is not enabled in settings.", p.id),
+                            });
+                            let headers = build_cors_headers(request);
+                            return (
+                                "HTTP/1.1 400 Bad Request",
+                                headers,
+                                body.to_string(),
+                                RouteAction::None,
+                            );
+                        }
+                        Some(p) => {
+                            if super::providers::find_adapter(&p.id).is_none() {
+                                let body = serde_json::json!({
+                                    "ok": false,
+                                    "code": "ADAPTER_UNAVAILABLE",
+                                    "message": format!("Provider '{}' does not have a download adapter yet.", p.id),
+                                });
+                                let headers = build_cors_headers(request);
+                                return (
+                                    "HTTP/1.1 501 Not Implemented",
+                                    headers,
+                                    body.to_string(),
+                                    RouteAction::None,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Duplicate request protection: check if a job for this appId+source is already active
+                {
+                    let jobs = job_store().lock().unwrap();
+                    for job in jobs.values() {
+                        if job.app_id == app_id
+                            && job.provider_id == source_id_normalized
+                            && (job.status == "queued"
+                                || job.status == "validating"
+                                || job.status == "checking_availability"
+                                || job.status == "downloading"
+                                || job.status == "extracting"
+                                || job.status == "processing")
+                        {
+                            let body = serde_json::json!({
+                                "ok": false,
+                                "code": "DUPLICATE_REQUEST",
+                                "message": format!("A download for this app is already in progress (requestId: {}).", job.request_id),
+                                "requestId": job.request_id,
+                            });
+                            let headers = build_cors_headers(request);
+                            return (
+                                "HTTP/1.1 409 Conflict",
+                                headers,
+                                body.to_string(),
+                                RouteAction::None,
+                            );
+                        }
+                    }
+                }
+
+                let request_id = generate_request_id();
+                {
+                    let mut jobs = job_store().lock().unwrap();
+                    jobs.insert(
+                        request_id.clone(),
+                        DownloadJob {
+                            request_id: request_id.clone(),
                             app_id: app_id.to_string(),
+                            provider_id: source_id_normalized.clone(),
+                            status: "validating".to_string(),
+                            progress: None,
+                            message: "Validating package request.".to_string(),
+                            error_code: None,
+                            output_type: Some(output_type.clone()),
+                            started_at: Instant::now(),
+                            completed_at: None,
                         },
                     );
                 }
+                eprintln!(
+                    "[STEAM_BRIDGE] Download request appId={app_id} source={source_id_normalized} requestId={request_id} outputType={:?}",
+                    output_type
+                );
 
-                // Check if source is enabled in config
-                let config = crate::config::load_config();
-                let provider_enabled = config
-                    .downloads
-                    .providers
-                    .iter()
-                    .find(|p| p.id == source_id)
-                    .map(|p| p.enabled)
-                    .unwrap_or(false);
-
-                if !provider_enabled {
-                    let body = serde_json::json!({
-                        "ok": false,
-                        "code": "SOURCE_DISABLED",
-                        "message": format!("Provider '{source_id}' is not enabled in settings."),
-                    });
-                    let headers = build_cors_headers(request);
-                    return (
-                        "HTTP/1.1 400 Bad Request",
-                        headers,
-                        body.to_string(),
-                        RouteAction::None,
-                    );
-                }
-
-                // Provider is enabled but has no adapter
                 let body = serde_json::json!({
-                    "ok": false,
-                    "code": "ADAPTER_UNAVAILABLE",
-                    "message": format!("Provider '{source_id}' does not have a download adapter yet."),
+                    "ok": true,
+                    "status": "queued",
+                    "requestId": request_id,
+                    "appId": app_id,
+                    "sourceId": source_id_normalized,
+                    "outputType": output_type,
+                    "message": "Package request added to the LumaForge queue."
                 });
                 let headers = build_cors_headers(request);
                 return (
-                    "HTTP/1.1 501 Not Implemented",
+                    "HTTP/1.1 200 OK",
                     headers,
                     body.to_string(),
-                    RouteAction::None,
+                    RouteAction::EmitDownloadProvider {
+                        app_id: app_id.to_string(),
+                        request_id,
+                        provider_id: source_id_normalized,
+                    },
                 );
             }
             Err(_) => {
@@ -753,6 +1072,82 @@ fn route_request(request: &str) -> (&'static str, String, String, RouteAction) {
         }
     }
 
+    // GET /api/download-status/{requestId} — poll job status
+    if request.starts_with("GET /api/download-status/") {
+        if let Some(request_id) = extract_path_param(request, "/api/download-status/") {
+            let jobs = job_store().lock().unwrap();
+            if let Some(job) = jobs.get(request_id) {
+                let elapsed_ms = job.started_at.elapsed().as_millis() as u64;
+                let body = serde_json::json!({
+                    "ok": true,
+                    "requestId": job.request_id,
+                    "appId": job.app_id,
+                    "providerId": job.provider_id,
+                    "status": job.status,
+                    "progress": job.progress,
+                    "message": job.message,
+                    "errorCode": job.error_code,
+                    "elapsedMs": elapsed_ms,
+                });
+                let headers = build_cors_headers(request);
+                return (
+                    "HTTP/1.1 200 OK",
+                    headers,
+                    body.to_string(),
+                    RouteAction::None,
+                );
+            } else {
+                let body = serde_json::json!({
+                    "ok": false,
+                    "code": "UNKNOWN_REQUEST",
+                    "message": "No download request found with the given ID."
+                });
+                let headers = build_cors_headers(request);
+                return (
+                    "HTTP/1.1 404 Not Found",
+                    headers,
+                    body.to_string(),
+                    RouteAction::None,
+                );
+            }
+        }
+    }
+
+    // POST /api/open-library/{appId} — open Steam Library details page
+    if request.starts_with("POST /api/open-library/") {
+        if let Some(app_id) = extract_path_param(request, "/api/open-library/") {
+            if !is_valid_package_id(app_id) {
+                let body = serde_json::json!({
+                    "ok": false,
+                    "code": "INVALID_PACKAGE_ID",
+                    "message": "Invalid app ID."
+                });
+                let headers = build_cors_headers(request);
+                return (
+                    "HTTP/1.1 400 Bad Request",
+                    headers,
+                    body.to_string(),
+                    RouteAction::None,
+                );
+            }
+            let uri = format!("steam://nav/games/details/{app_id}");
+            eprintln!("[STEAM_BRIDGE] Opening Steam Library details for AppID: {app_id}");
+            let body = serde_json::json!({
+                "ok": true,
+                "appId": app_id,
+                "uri": uri,
+                "message": "Opening Steam Library."
+            });
+            let headers = build_cors_headers(request);
+            return (
+                "HTTP/1.1 200 OK",
+                headers,
+                body.to_string(),
+                RouteAction::OpenLibrary { uri },
+            );
+        }
+    }
+
     let body = serde_json::json!({
         "ok": false,
         "code": "NOT_FOUND",
@@ -763,7 +1158,9 @@ fn route_request(request: &str) -> (&'static str, String, String, RouteAction) {
             "/api/settings",
             "/api/download-package/{appId}",
             "/api/sources/{appId}",
-            "POST /api/download"
+            "POST /api/download",
+            "GET  /api/download-status/{requestId}",
+            "POST /api/open-library/{appId}"
         ]
     });
     let headers = build_cors_headers(request);
@@ -896,6 +1293,66 @@ mod tests {
         assert!(matches!(action, RouteAction::EmitDownloadPackage(ref id) if id == "999"));
     }
 
+    // --- New endpoint tests: download-status and open-library ---
+
+    #[test]
+    fn download_status_unknown_request_returns_404() {
+        let req = "GET /api/download-status/req-999 HTTP/1.1\r\n\r\n";
+        let (status, _, body, _) = route_request(req);
+        assert!(status.contains("404"));
+        assert!(body.contains("UNKNOWN_REQUEST"));
+    }
+
+    #[test]
+    fn download_status_empty_id_returns_404() {
+        let req = "GET /api/download-status/ HTTP/1.1\r\n\r\n";
+        let (status, _, _, _) = route_request(req);
+        assert!(status.contains("404"));
+    }
+
+    #[test]
+    fn open_library_valid_id_returns_200() {
+        let req = "POST /api/open-library/12345 HTTP/1.1\r\n\r\n";
+        let (status, _, body, action) = route_request(req);
+        assert!(status.contains("200"));
+        assert!(body.contains("12345"));
+        assert!(body.contains("steam://nav/games/details/12345"));
+        assert!(matches!(action, RouteAction::OpenLibrary { .. }));
+    }
+
+    #[test]
+    fn open_library_invalid_id_returns_400() {
+        let req = "POST /api/open-library/abc HTTP/1.1\r\n\r\n";
+        let (status, _, body, _) = route_request(req);
+        assert!(status.contains("400"));
+        assert!(body.contains("INVALID_PACKAGE_ID"));
+    }
+
+    #[test]
+    fn open_library_cors_with_steam_origin() {
+        let req = "POST /api/open-library/12345 HTTP/1.1\r\nOrigin: https://store.steampowered.com\r\n\r\n";
+        let (status, headers, body, _) = route_request(req);
+        assert!(status.contains("200"));
+        assert!(headers.contains("Access-Control-Allow-Origin: https://store.steampowered.com"));
+        assert!(body.contains("12345"));
+    }
+
+    #[test]
+    fn download_status_returns_200_after_download_request() {
+        let req = "POST /api/download HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"appId\":\"12345\",\"sourceId\":\"hubcap\"}";
+        let (_, _, body, _) = route_request(req);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let request_id = v["requestId"].as_str().unwrap();
+
+        let status_req = format!("GET /api/download-status/{request_id} HTTP/1.1\r\n\r\n");
+        let (status, _, status_body, _) = route_request(&status_req);
+        assert!(status.contains("200"));
+        let sv: serde_json::Value = serde_json::from_str(&status_body).unwrap();
+        assert_eq!(sv["ok"], true);
+        assert_eq!(sv["status"], "queued");
+        assert_eq!(sv["appId"], "12345");
+    }
+
     #[test]
     fn unsupported_method_returns_404() {
         let req = "DELETE /api/download-package/123 HTTP/1.1\r\n\r\n";
@@ -947,9 +1404,10 @@ mod tests {
         let req = "POST /api/download HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"appId\":\"12345\",\"sourceId\":\"hubcap\"}";
         let (status, _, body, action) = route_request(req);
         assert!(status.contains("200"));
-        assert!(body.contains("accepted"));
+        assert!(body.contains("queued"));
         assert!(body.contains("hubcapdb"));
-        assert!(matches!(action, RouteAction::EmitDownloadHubcap { .. }));
+        assert!(body.contains("requestId"));
+        assert!(matches!(action, RouteAction::EmitDownloadProvider { .. }));
     }
 
     #[test]
@@ -958,7 +1416,8 @@ mod tests {
         let (status, _, body, action) = route_request(req);
         assert!(status.contains("200"));
         assert!(body.contains("hubcapdb"));
-        assert!(matches!(action, RouteAction::EmitDownloadHubcap { .. }));
+        assert!(body.contains("requestId"));
+        assert!(matches!(action, RouteAction::EmitDownloadProvider { .. }));
     }
 
     #[test]
@@ -1006,7 +1465,7 @@ mod tests {
         let req = "POST /api/download HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"appId\":\"12345\",\"sourceId\":\"hubcap\"}";
         let (status, _, body, _) = route_request(req);
         assert!(status.contains("200"));
-        assert!(body.contains("accepted"));
+        assert!(body.contains("queued"));
     }
 
     #[test]
@@ -1281,5 +1740,32 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["ok"], true);
         assert_eq!(v["appId"], "3241660");
+    }
+
+    // --- Bridge readiness tests ---
+
+    #[test]
+    fn bridge_readiness_becomes_true_after_signal() {
+        let flag = &BRIDGE_READY_FLAG;
+        let prev = flag.load(Ordering::SeqCst);
+        if !prev {
+            flag.store(true, Ordering::SeqCst);
+            let (lock, cv) = bridge_sync();
+            let mut ready = lock.lock().unwrap();
+            *ready = true;
+            cv.notify_all();
+        }
+        assert!(wait_until_bridge_ready(100));
+        flag.store(prev, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn wait_until_bridge_ready_returns_true_when_already_ready() {
+        assert!(wait_until_bridge_ready(100));
+    }
+
+    #[test]
+    fn bridge_running_flag_initializes_false() {
+        assert!(!BRIDGE_RUNNING.load(Ordering::SeqCst));
     }
 }

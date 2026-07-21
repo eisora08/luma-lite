@@ -71,7 +71,14 @@ fn re_inject_enabled_extensions(plugins: &[commands::plugins::PluginEntry]) {
                 commands::steam_inject::track_injection(
                     &plugin.id,
                     &target_url,
+                    &result.injected_target_ids,
                     &result.injected_tab_urls,
+                    &std::iter::repeat(None)
+                        .take(result.injected_target_ids.len())
+                        .collect::<Vec<_>>(),
+                    &std::iter::repeat(None)
+                        .take(result.injected_target_ids.len())
+                        .collect::<Vec<_>>(),
                 );
                 if result.success {
                     eprintln!(
@@ -79,6 +86,7 @@ fn re_inject_enabled_extensions(plugins: &[commands::plugins::PluginEntry]) {
                         result.injected_tab_urls.len(),
                         plugin.id
                     );
+                    commands::steam_inject::start_target_monitor(plugin.id.clone(), target_url);
                 } else if let Some(ref err) = result.error {
                     eprintln!("[BOOT] Injection for '{}': {err}", plugin.id);
                 }
@@ -226,8 +234,15 @@ pub fn run() {
             // Start the Steam CEF HTTP bridge
             commands::steam_bridge::start_steam_bridge(handle.clone());
 
-            // Re-inject CEF extensions that are already enabled
-            re_inject_enabled_extensions(&plugins);
+            // Wait for the bridge to be ready before reinjecting
+            eprintln!("[BOOT] Waiting for Steam bridge readiness");
+            let bridge_ready = commands::steam_bridge::wait_until_bridge_ready(5000);
+            if bridge_ready {
+                eprintln!("[BOOT] Steam bridge ready; injecting enabled extensions");
+                re_inject_enabled_extensions(&plugins);
+            } else {
+                eprintln!("[BOOT] Bridge was not ready; deferring enabled extension injection");
+            }
 
             // Initialize system tray
             commands::tray::init_system_tray(app)?;

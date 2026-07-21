@@ -295,11 +295,22 @@ fn activate_cef_injection(plugin: &PluginEntry) {
         script_path.display()
     );
 
-    let skip = super::steam_inject::get_injected_urls(&plugin.id);
+    let skip = super::steam_inject::get_injected_target_ids(&plugin.id);
     let result = super::steam_inject::inject_code_into_tabs(&target, &js_code, &skip);
 
     if result.success && !result.injected_tab_urls.is_empty() {
-        super::steam_inject::track_injection(&plugin.id, &target, &result.injected_tab_urls);
+        super::steam_inject::track_injection(
+            &plugin.id,
+            &target,
+            &result.injected_target_ids,
+            &result.injected_tab_urls,
+            &std::iter::repeat(None)
+                .take(result.injected_target_ids.len())
+                .collect::<Vec<_>>(),
+            &std::iter::repeat(None)
+                .take(result.injected_target_ids.len())
+                .collect::<Vec<_>>(),
+        );
 
         eprintln!(
             "[PLUGINS] Injected {} into {} tab(s) for '{}'",
@@ -315,10 +326,13 @@ fn activate_cef_injection(plugin: &PluginEntry) {
             plugin.id, result.tabs_found
         );
     }
+
+    super::steam_inject::start_target_monitor(plugin.id.clone(), target);
 }
 
 fn deactivate_cef_injection(plugin_id: &str) {
     super::steam_inject::clear_injection(plugin_id);
+    super::steam_inject::stop_target_monitor();
     eprintln!("[PLUGINS] Cleared CEF injection state for {plugin_id}");
 }
 
