@@ -114,7 +114,30 @@
       s.textContent =
         '@keyframes luma_ssh_spin{to{transform:rotate(360deg)}}' +
         '@keyframes luma_ssh_fade{from{opacity:0}to{opacity:1}}' +
-        '@keyframes luma_ssh_slide{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}';
+        '@keyframes luma_ssh_slide{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}' +
+
+        '.luma-ssh-action-button:not([aria-disabled="true"]):hover{' +
+        'background:linear-gradient(180deg,#32a9ed 0%,#1687c5 100%)!important;' +
+        'border-color:rgba(130,215,255,.82)!important;' +
+        'color:#fff!important;' +
+        'box-shadow:0 0 12px rgba(42,174,243,.42),inset 0 1px 0 rgba(255,255,255,.18)!important;' +
+        '}' +
+
+        '.luma-ssh-action-button:not([aria-disabled="true"]):active{' +
+        'transform:translateY(1px) scale(.985);' +
+        'background:linear-gradient(180deg,#1687c5 0%,#126b9c 100%)!important;' +
+        'box-shadow:0 1px 2px rgba(0,0,0,.4)!important;' +
+        '}' +
+
+        '.luma-ssh-action-button:focus-visible{' +
+        'outline:2px solid #9bddff!important;' +
+        'outline-offset:2px!important;' +
+        'box-shadow:0 0 0 3px rgba(43,174,243,.28)!important;' +
+        '}' +
+
+        '.luma-ssh-action-button[aria-disabled="true"]{' +
+        'cursor:default!important;' +
+        '}';
       (document.head || document.documentElement).appendChild(s);
     } catch (_) { }
   }
@@ -123,7 +146,7 @@
   // Inline style constants
   // ---------------------------------------------------------------------------
   var ST = {
-    btn: 'display:inline-flex;align-items:center;gap:6px;padding:7px 16px;margin-left:10px;border:none;border-radius:3px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:linear-gradient(to right,#1a9fff,#66c0ff);color:#fff;box-shadow:0 0 8px rgba(102,192,255,.25);vertical-align:middle;position:relative;z-index:1;',
+    btn: 'display:inline-flex;align-items:center;gap:7px;padding:7px 16px;margin-left:10px;border:1px solid rgba(102,192,255,.32);border-radius:3px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:linear-gradient(180deg,#2478a8 0%,#17628f 100%);color:#dff4ff;box-shadow:0 1px 2px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.08);vertical-align:middle;position:relative;z-index:1;transition:background .16s ease,border-color .16s ease,box-shadow .16s ease,transform .08s ease,color .16s ease;',
     btnSuccess: 'display:inline-flex;align-items:center;gap:6px;padding:7px 16px;margin-left:10px;border:none;border-radius:3px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:linear-gradient(to right,#2ea043,#64c882);color:#fff;box-shadow:0 0 8px rgba(100,200,130,.3);vertical-align:middle;position:relative;z-index:1;',
     btnInstalled: 'display:inline-flex;align-items:center;gap:6px;padding:7px 16px;margin-left:10px;border:1px solid rgba(100,200,130,.3);border-radius:3px;cursor:default;font-family:inherit;font-size:13px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:rgba(46,160,67,.1);color:#64c882;vertical-align:middle;position:relative;z-index:1;opacity:.7;pointer-events:none;',
 
@@ -644,6 +667,7 @@
         var btn = document.createElement('button');
         btn.type = 'button';
         btn.id = BTN_ID;
+        btn.className = 'luma-ssh-action-button';
         btn.setAttribute(BTN_MARKER_ATTR, BTN_MARKER_VAL);
         btn.setAttribute(BTN_APPID_ATTR, appId);
         btn.setAttribute(BTN_STATE_ATTR, 'checking');
