@@ -1,0 +1,53 @@
+﻿# Frontend
+node_modules/
+dist/
+.vite/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Rust / Tauri build artifacts
+target/
+src-tauri/target/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+
+# Local application data and runtime configuration
+AppData/
+LumaForge/
+plugin-backups/
+extension-config.json
+
+# Editors
+.vscode/
+.idea/
+*.code-workspace
+
+# Operating system
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary and recovered files
+*.tmp
+*.bak
+*.old
+*-recovered.*
+LumaForge-Recovery/
+LumaForge-Backup-*/
+
+# OpenCode temporary files
+.opencode/
+
+# Migration backups and dev artifacts
+.pre-migration-backup/
+dev-output.txt
+dev-ready.txt
+rust-output.txt

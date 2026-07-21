@@ -1,0 +1,13 @@
+{
+  "id": "steam-store-helper",
+  "name": "Steam Store Helper",
+  "version": "2.4.3",
+  "description": "Browse and download Steam package files through the LumaForge extension system.",
+  "author": "LumaForge",
+  "hasDetect": false,
+  "activation": {
+    "cefInjection": true,
+    "injectScript": "inject.js",
+    "targetUrl": "store.steampowered.com"
+  }
+}
