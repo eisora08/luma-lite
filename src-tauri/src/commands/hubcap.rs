@@ -1,14 +1,19 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use serde_json::Value;
-const HUBCAP_BASE_URL: &str = "https://hubcapmanifest.com/api/v1";
-const HUBCAP_TIMEOUT_SECS: u64 = 30;
+
+const HUBCAP_BASE_URL: &str =
+    "https://hubcapmanifest.com/api/v1";
+
+const HUBCAP_TIMEOUT_SECS: u64 = 8;
+const HUBCAP_AVAILABILITY_TIMEOUT_SECS: u64 = 8;
 const HUBCAP_STATS_CACHE_SECS: u64 = 60;
+
 const MAX_ZIP_SIZE_BYTES: u64 = 500 * 1024 * 1024; // 500 MB
 const MAX_ZIP_ENTRIES: usize = 10_000;
 const MAX_SINGLE_ENTRY_SIZE: u64 = 200 * 1024 * 1024; // 200 MB
@@ -62,6 +67,14 @@ fn build_client() -> reqwest::blocking::Client {
         .unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
 
+fn build_availability_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(HUBCAP_AVAILABILITY_TIMEOUT_SECS))
+        .danger_accept_invalid_certs(false)
+        .build()
+        .map_err(|error| format!("Failed to create HubcapDB availability client: {error}"))
+}
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -232,8 +245,6 @@ pub fn save_package_metadata(app_id: &str, metadata: &PackageMetadata) -> Result
     Ok(())
 }
 
-
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubcapUsageStats {
     pub daily_usage: u64,
@@ -250,72 +261,46 @@ struct CachedHubcapUsageStats {
     stats: HubcapUsageStats,
 }
 
-static HUBCAP_STATS_CACHE: Mutex<Option<CachedHubcapUsageStats>> =
-    Mutex::new(None);
-
-
+static HUBCAP_STATS_CACHE: Mutex<Option<CachedHubcapUsageStats>> = Mutex::new(None);
 
 pub fn get_user_stats() -> Result<HubcapUsageStats, String> {
     {
         let cache = HUBCAP_STATS_CACHE
             .lock()
-            .map_err(|_| {
-                "Failed to acquire HubcapDB stats cache."
-                    .to_string()
-            })?;
+            .map_err(|_| "Failed to acquire HubcapDB stats cache.".to_string())?;
 
         if let Some(cached) = cache.as_ref() {
-            if cached.fetched_at.elapsed()
-                < Duration::from_secs(HUBCAP_STATS_CACHE_SECS)
-            {
+            if cached.fetched_at.elapsed() < Duration::from_secs(HUBCAP_STATS_CACHE_SECS) {
                 return Ok(cached.stats.clone());
             }
         }
     }
 
-    let api_key = get_api_key().ok_or_else(|| {
-        "No HubcapDB API key configured.".to_string()
-    })?;
+    let api_key = get_api_key().ok_or_else(|| "No HubcapDB API key configured.".to_string())?;
 
     let url = format!("{HUBCAP_BASE_URL}/user/stats");
     let client = build_client();
 
     let response = client
         .get(&url)
-        .header(
-            "Authorization",
-            format!("Bearer {api_key}"),
-        )
+        .header("Authorization", format!("Bearer {api_key}"))
         .send()
-        .map_err(|error| {
-            format!(
-                "HubcapDB user statistics request failed: {error}"
-            )
-        })?;
+        .map_err(|error| format!("HubcapDB user statistics request failed: {error}"))?;
 
     let status = response.status();
 
     if !status.is_success() {
         return Err(match status.as_u16() {
             401 => "HubcapDB API key is invalid.".to_string(),
-            403 => {
-                "HubcapDB API access was denied.".to_string()
-            }
-            429 => {
-                "HubcapDB daily request limit was reached."
-                    .to_string()
-            }
-            code => format!(
-                "HubcapDB user statistics returned HTTP {code}."
-            ),
+            403 => "HubcapDB API access was denied.".to_string(),
+            429 => "HubcapDB daily request limit was reached.".to_string(),
+            code => format!("HubcapDB user statistics returned HTTP {code}."),
         });
     }
 
-    let value: Value = response.json().map_err(|error| {
-        format!(
-            "Failed to parse HubcapDB user statistics: {error}"
-        )
-    })?;
+    let value: Value = response
+        .json()
+        .map_err(|error| format!("Failed to parse HubcapDB user statistics: {error}"))?;
 
     let daily_usage = value
         .get("daily_usage")
@@ -327,8 +312,7 @@ pub fn get_user_stats() -> Result<HubcapUsageStats, String> {
         .and_then(Value::as_u64)
         .unwrap_or(0);
 
-    let remaining_today =
-        daily_limit.saturating_sub(daily_usage);
+    let remaining_today = daily_limit.saturating_sub(daily_usage);
 
     let api_key_usage_count = value
         .get("api_key_usage_count")
@@ -363,10 +347,7 @@ pub fn get_user_stats() -> Result<HubcapUsageStats, String> {
     {
         let mut cache = HUBCAP_STATS_CACHE
             .lock()
-            .map_err(|_| {
-                "Failed to update HubcapDB stats cache."
-                    .to_string()
-            })?;
+            .map_err(|_| "Failed to update HubcapDB stats cache.".to_string())?;
 
         *cache = Some(CachedHubcapUsageStats {
             fetched_at: Instant::now(),
@@ -412,7 +393,18 @@ pub fn check_availability(app_id: &str) -> AvailabilityResult {
     };
 
     let url = format!("{HUBCAP_BASE_URL}/status/{app_id}");
-    let client = build_client();
+    let client = match build_availability_client() {
+        Ok(client) => client,
+
+        Err(error) => {
+            return AvailabilityResult {
+                available: false,
+                file_count: 0,
+                total_size: 0,
+                detail: Some(error),
+            };
+        }
+    };
 
     match client
         .get(&url)

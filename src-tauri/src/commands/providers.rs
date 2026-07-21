@@ -47,16 +47,30 @@ impl ProviderAdapter for HubcapDBAdapter {
     }
 
     fn check_availability(&self, app_id: &str) -> ProviderAvailability {
+        let started_at = std::time::Instant::now();
+
+        eprintln!("[HUBCAP] Checking package availability for app_id={app_id}");
+
         let result = hubcap::check_availability(app_id);
 
-        let usage = match hubcap::get_user_stats() {
-            Ok(stats) => Some(stats),
+        eprintln!(
+        "[HUBCAP] Package availability completed for app_id={app_id}: available={}, elapsed_ms={}",
+        result.available,
+        started_at.elapsed().as_millis()
+    );
 
-            Err(error) => {
-                eprintln!("[HUBCAP] Usage statistics unavailable: {error}");
+        let usage = if result.available {
+            match hubcap::get_user_stats() {
+                Ok(stats) => Some(stats),
 
-                None
+                Err(error) => {
+                    eprintln!("[HUBCAP] Usage statistics unavailable for app_id={app_id}: {error}");
+
+                    None
+                }
             }
+        } else {
+            None
         };
 
         ProviderAvailability {
@@ -189,32 +203,55 @@ pub fn find_adapter(provider_id: &str) -> Option<&'static Box<dyn ProviderAdapte
 
 /// Check availability for a specific app across all enabled providers.
 /// Returns a list of ProviderAvailability results, one per enabled provider.
-pub fn check_sources_availability(app_id: &str) -> Vec<ProviderAvailability> {
+pub fn check_sources_availability(
+    app_id: &str,
+) -> Vec<ProviderAvailability> {
     let config = crate::config::load_config();
+
     let enabled_providers: Vec<String> = config
         .downloads
         .providers
         .iter()
-        .filter(|p| p.enabled)
-        .map(|p| p.id.clone())
+        .filter(|provider| provider.enabled)
+        .map(|provider| provider.id.clone())
         .collect();
 
     let mut results = Vec::new();
 
     for provider_id in &enabled_providers {
-        let availability = if let Some(adapter) = find_adapter(provider_id) {
-            adapter.check_availability(app_id)
-        } else {
-            ProviderAvailability {
-                provider_id: provider_id.clone(),
-                name: provider_id.clone(),
-                available: false,
-                file_count: 0,
-                usage: None,
-                total_size: 0,
-                detail: Some("No adapter available".to_string()),
-            }
-        };
+        let started_at = std::time::Instant::now();
+
+        eprintln!(
+            "[PROVIDERS] Checking availability: app_id={}, provider={}",
+            app_id,
+            provider_id
+        );
+
+        let availability =
+            if let Some(adapter) = find_adapter(provider_id) {
+                adapter.check_availability(app_id)
+            } else {
+                ProviderAvailability {
+                    provider_id: provider_id.clone(),
+                    name: provider_id.clone(),
+                    available: false,
+                    file_count: 0,
+                    total_size: 0,
+                    detail: Some(
+                        "No adapter available".to_string(),
+                    ),
+                    usage: None,
+                }
+            };
+
+        eprintln!(
+            "[PROVIDERS] Availability completed: app_id={}, provider={}, available={}, elapsed_ms={}",
+            app_id,
+            provider_id,
+            availability.available,
+            started_at.elapsed().as_millis()
+        );
+
         results.push(availability);
     }
 

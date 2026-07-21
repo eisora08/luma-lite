@@ -13,7 +13,7 @@ use tungstenite::{connect, Message, WebSocket};
 const CEF_DEBUG_PORTS: &[u16] = &[8080, 8081, 8082, 8083, 9222];
 const HTTP_TIMEOUT_SECS: u64 = 3;
 const WS_RETRY_ATTEMPTS: u32 = 2;
-const LUMA_INJECT_VERSION: &str = "2.5.0-download-flow";
+const LUMA_INJECT_VERSION: &str = "2.5.1-provider-results";
 const TARGET_MONITOR_INTERVAL_MS: u64 = 1500;
 
 const CDP_ID_PAGE_ENABLE: u64 = 1;

@@ -8,7 +8,7 @@
 (function () {
   'use strict';
 
-  var LUMA_INJECT_VERSION = '2.5.0-download-flow';
+  var LUMA_INJECT_VERSION = '2.5.1-provider-results';
   var DOCUMENT_ID = Date.now() + '-' + Math.random().toString(36).slice(2);
 
   var EXTENSION_ID = 'steam-store-helper';
@@ -952,7 +952,16 @@
       }
       var providerController = new AbortController();
       state.providerAbortController = providerController;
+      var providerTimeout = setTimeout(function () {
+        if (!providerController.signal.aborted) {
+          console.error(
+            '[LUMA_BRIDGE] Sources request timed out for AppID:',
+            appId
+          );
 
+          providerController.abort();
+        }
+      }, 12000);
       var url = sourcesUrl(appId);
       var providerOpts = { method: 'GET', mode: 'cors', cache: 'no-store', signal: providerController.signal };
       retryFetch(url, providerOpts, 'sources', {
@@ -965,82 +974,232 @@
         },
       })
         .then(function (r) {
+          clearTimeout(providerTimeout);
           console.log("[PROVIDER_FETCH] RESPONSE_RECEIVED:", true);
           console.log("[PROVIDER_FETCH] STATUS:", r.status);
           console.log("[PROVIDER_FETCH] OK:", r.ok);
           if (!r.ok) throw new Error('HTTP ' + r.status);
           return r.json();
         })
-        .then(function (d) {
-          if (providerController.signal.aborted) return;
+        .then(function (data) {
+          if (providerController.signal.aborted) {
+            console.log(
+              '[PROVIDER_FETCH] Response ignored because request was aborted'
+            );
 
-          var sources = Array.isArray(d.sources) ? d.sources : [];
-          var unavailableSources = Array.isArray(d.unavailableSources)
-            ? d.unavailableSources
+            return;
+          }
+
+          console.log(
+            '[PROVIDER_FETCH] PARSED_RESPONSE:',
+            data
+          );
+
+          var sources = Array.isArray(data.sources)
+            ? data.sources
             : [];
 
-          console.log('[LUMA_BRIDGE] sources — Received', sources.length, 'sources');
-          if (d && d.ok && Array.isArray(sources)) {
+          var unavailableSources = Array.isArray(
+            data.unavailableSources
+          )
+            ? data.unavailableSources
+            : [];
+
+          console.log(
+            '[PROVIDER_FETCH] AVAILABLE_SOURCES:',
+            sources.length
+          );
+
+          console.log(
+            '[PROVIDER_FETCH] UNAVAILABLE_SOURCES:',
+            unavailableSources.length
+          );
+
+          if (data && data.ok === true) {
+            console.log(
+              '[PROVIDER_FETCH] Calling renderSources'
+            );
 
             renderSources(
               body,
               sources,
               unavailableSources,
               appId,
-              d.message || null
+              data.message || null
             );
 
-          } else {
-            throw new Error((d && d.message) || 'Invalid response from bridge');
+            console.log(
+              '[PROVIDER_FETCH] renderSources completed'
+            );
+
+            if (
+              state.providerAbortController ===
+              providerController
+            ) {
+              state.providerAbortController = null;
+            }
+
+            return;
           }
+
+          throw new Error(
+            data && data.message
+              ? data.message
+              : 'Invalid response from bridge'
+          );
         })
-        .catch(function (err) {
-          if (err && err.name === 'AbortError') return;
-          console.error("[PROVIDER_FETCH] REJECTED:", err);
-          console.error("[PROVIDER_FETCH] ERROR_NAME:", err && err.name);
-          console.error("[PROVIDER_FETCH] ERROR_MESSAGE:", err && err.message);
-          console.error("[PROVIDER_FETCH] ERROR_STACK:", err && err.stack);
-          console.error('[LUMA_BRIDGE] providers — Error:', err.name || err.message || err);
-          var detail = (err.name || 'Error') + ': ' + (err.message || '');
+        .catch(function (error) {
+          clearTimeout(providerTimeout);
+
+          var modal = document.querySelector(
+            '[' +
+            MODAL_MARKER_ATTR +
+            '="' +
+            MODAL_MARKER_VAL +
+            '"]'
+          );
+
+          // El modal ya fue cerrado. No hay UI que actualizar.
+          if (!modal) {
+            return;
+          }
+
+          var wasTimedOut =
+            error &&
+            error.name === 'AbortError' &&
+            providerController.signal.aborted &&
+            state.providerAbortController === providerController;
+
+          var wasClosedOrReplaced =
+            error &&
+            error.name === 'AbortError' &&
+            state.providerAbortController !== providerController;
+
+          // Cerrar el modal o abrir otro modal aborta la solicitud.
+          // Eso no debe mostrarse como un error.
+          if (wasClosedOrReplaced) {
+            return;
+          }
+
+          console.error(
+            '[PROVIDER_FETCH] REJECTED:',
+            error
+          );
+
+          console.error(
+            '[PROVIDER_FETCH] ERROR_NAME:',
+            error && error.name
+          );
+
+          console.error(
+            '[PROVIDER_FETCH] ERROR_MESSAGE:',
+            error && error.message
+          );
+
+          var detail = wasTimedOut
+            ? 'The provider check took too long. Please try again.'
+            : (
+              (error && error.name
+                ? error.name
+                : 'Error') +
+              ': ' +
+              (error && error.message
+                ? error.message
+                : 'Unknown provider error')
+            );
+
           body.innerHTML =
             '<div style="' + ST.errorWrap + '">' +
-            '<div style="' + ST.errorMsg + '">Could not load providers.</div>' +
-            '<div style="' + ST.errorDetail + '">' + detail + '</div>' +
-            '<div style="text-align:center"><button id="luma-retry-sources" style="' + ST.retryBtn + '">Retry</button></div>' +
+            '<div style="' + ST.errorMsg + '">' +
+            'Could not check package sources.' +
+            '</div>' +
+            '<div style="' + ST.errorDetail + '">' +
+            detail +
+            '</div>' +
+            '<div style="text-align:center">' +
+            '<button id="luma-retry-sources" style="' +
+            ST.retryBtn +
+            '">' +
+            'Retry' +
+            '</button>' +
+            '</div>' +
             '</div>';
         });
+
     } catch (e) { console.error('[CEF_INJECT_ERROR] openSourceModal:', e); }
   }
 
   // ---------------------------------------------------------------------------
   // Modal: render source list
   // ---------------------------------------------------------------------------
-  function renderSources(body, sources, appId, unavailableSources, message) {
+  function renderSources(
+    body,
+    sources,
+    unavailableSources,
+    appId,
+    message
+  ) {
     try {
+      console.log(
+        '[PROVIDER_RENDER] Rendering sources:',
+        {
+          appId: appId,
+          available: sources
+            ? sources.length
+            : 0,
+          unavailable: unavailableSources
+            ? unavailableSources.length
+            : 0,
+          message: message
+        }
+      );
+
       if (!sources || !sources.length) {
         var unavailableDetails = '';
 
-        if (unavailableSources && unavailableSources.length) {
+        if (
+          unavailableSources &&
+          unavailableSources.length
+        ) {
           unavailableDetails =
             '<div style="margin-top:12px;text-align:left;">' +
-            unavailableSources.map(function (source) {
-              var name = source.name || source.id || 'Provider';
-              var reason = source.detail || 'Package not available';
+            unavailableSources
+              .map(function (source) {
+                var sourceName =
+                  source.name ||
+                  source.id ||
+                  'Provider';
 
-              return (
-                '<div style="margin-top:6px;padding:8px 10px;' +
-                'background:rgba(255,255,255,.03);' +
-                'border:1px solid rgba(255,255,255,.06);' +
-                'border-radius:4px;">' +
-                '<div style="color:#c7d5e0;font-size:12px;font-weight:600;">' +
-                name +
-                '</div>' +
-                '<div style="color:#8f98a0;font-size:11px;margin-top:2px;">' +
-                reason +
-                '</div>' +
-                '</div>'
-              );
-            }).join('') +
+                var reason =
+                  source.detail ||
+                  'Package not available';
+
+                return (
+                  '<div style="' +
+                  'margin-top:6px;' +
+                  'padding:8px 10px;' +
+                  'background:rgba(255,255,255,.03);' +
+                  'border:1px solid rgba(255,255,255,.06);' +
+                  'border-radius:4px;' +
+                  '">' +
+                  '<div style="' +
+                  'color:#c7d5e0;' +
+                  'font-size:12px;' +
+                  'font-weight:600;' +
+                  '">' +
+                  sourceName +
+                  '</div>' +
+                  '<div style="' +
+                  'color:#8f98a0;' +
+                  'font-size:11px;' +
+                  'margin-top:2px;' +
+                  '">' +
+                  reason +
+                  '</div>' +
+                  '</div>'
+                );
+              })
+              .join('') +
             '</div>';
         }
 
@@ -1050,15 +1209,22 @@
           'No package sources available.' +
           '</div>' +
           '<div style="' + ST.errorDetail + '">' +
-          (message ||
-            'No enabled provider currently has a package for this App ID.') +
+          (
+            message ||
+            'No enabled provider currently has a package for this App ID.'
+          ) +
           '</div>' +
           unavailableDetails +
           '</div>';
 
+        console.log(
+          '[PROVIDER_RENDER] Empty-source state rendered'
+        );
+
         return;
       }
 
+      // Conserva aquí el resto actual de renderSources().
       body.innerHTML = '';
       sources.forEach(function (src) {
         var avail = !!src.available;
