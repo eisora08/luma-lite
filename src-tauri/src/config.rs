@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -102,6 +102,19 @@ impl ProviderConfig {
     }
 }
 
+/// A configured extension repository source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositorySource {
+    pub url: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub last_fetched: Option<u64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
 /// Downloads configuration section, nested inside AppConfig.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,6 +194,9 @@ pub struct AppConfig {
     /// Download provider configurations.
     #[serde(default)]
     pub downloads: DownloadsConfig,
+    /// Extension repository sources.
+    #[serde(default)]
+    pub repositories: Vec<RepositorySource>,
 }
 
 #[derive(Debug, Serialize)]
@@ -198,7 +214,11 @@ pub struct SteamRootInfo {
 // Config file persistence
 // ---------------------------------------------------------------------------
 
-static CONFIG: OnceLock<AppConfig> = OnceLock::new();
+static CONFIG: OnceLock<RwLock<Option<AppConfig>>> = OnceLock::new();
+
+fn get_config_lock() -> &'static RwLock<Option<AppConfig>> {
+    CONFIG.get_or_init(|| RwLock::new(None))
+}
 
 /// Canonical application data directory: `{local_data_dir}/LumaForge`
 fn app_data_dir() -> PathBuf {
@@ -208,33 +228,61 @@ fn app_data_dir() -> PathBuf {
 }
 
 /// Resolve the config file path: `{app_data_dir}/config.json`
-fn config_path() -> PathBuf {
+pub(crate) fn config_path() -> PathBuf {
     app_data_dir().join("config.json")
 }
 
-/// Load the app config from disk, run idempotent migration, and cache.
-pub fn load_config() -> &'static AppConfig {
-    CONFIG.get_or_init(|| {
-        let path = config_path();
-        let mut config: AppConfig = match fs::read_to_string(&path) {
-            Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-            Err(_) => AppConfig::default(),
-        };
+/// Load the app config from disk (cached after first read), run migration, and return a clone.
+pub fn load_config() -> AppConfig {
+    let lock = get_config_lock();
 
-        let migrated = migrate_providers(&mut config.downloads.providers);
-        if migrated {
-            eprintln!("[CONFIG] Provider migration applied, saving.");
-            if let Err(e) = save_config(&config) {
-                eprintln!("[CONFIG] Failed to save migrated config: {e}");
-            }
+    // Fast path: already loaded in memory
+    {
+        let guard = lock.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref config) = *guard {
+            return config.clone();
         }
+    }
 
-        config
-    })
+    // Slow path: load from disk
+    let path = config_path();
+    let mut config: AppConfig = match fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        Err(_) => AppConfig::default(),
+    };
+
+    let migrated = migrate_providers(&mut config.downloads.providers);
+    if migrated {
+        eprintln!("[CONFIG] Provider migration applied, saving.");
+        if let Err(e) = save_config_inner(&config) {
+            eprintln!("[CONFIG] Failed to save migrated config: {e}");
+        }
+    }
+
+    // Store in lock
+    {
+        let mut guard = lock.write().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(config.clone());
+    }
+
+    config
 }
 
-/// Save the app config to disk.
+/// Save the app config to disk and update the in-memory cache.
 pub(crate) fn save_config(config: &AppConfig) -> Result<(), String> {
+    save_config_inner(config)?;
+
+    // Update in-memory cache so subsequent load_config() calls see the new values
+    let lock = get_config_lock();
+    {
+        let mut guard = lock.write().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(config.clone());
+    }
+
+    Ok(())
+}
+
+fn save_config_inner(config: &AppConfig) -> Result<(), String> {
     let path = config_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -1074,6 +1122,7 @@ mod tests {
                 multi_provider_fallback: true,
                 providers: default_providers(),
             },
+            repositories: vec![],
         };
         let json = serde_json::to_string(&config).unwrap();
         let restored: AppConfig = serde_json::from_str(&json).unwrap();

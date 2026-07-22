@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-const HUBCAP_BASE_URL: &str =
-    "https://hubcapmanifest.com/api/v1";
+const HUBCAP_BASE_URL: &str = "https://hubcapmanifest.com/api/v1";
 
 const HUBCAP_TIMEOUT_SECS: u64 = 8;
 const HUBCAP_AVAILABILITY_TIMEOUT_SECS: u64 = 8;

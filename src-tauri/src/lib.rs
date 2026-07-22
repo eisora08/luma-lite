@@ -289,6 +289,14 @@ pub fn run() {
             commands::plugins::scan_plugins,
             commands::plugins::toggle_plugin,
             commands::plugins::reload_plugins,
+            // Repository management
+            commands::repository::list_extension_repositories,
+            commands::repository::add_extension_repository,
+            commands::repository::remove_extension_repository,
+            commands::repository::refresh_extension_repository,
+            commands::repository::list_repository_extensions,
+            commands::repository::install_repository_extension,
+            commands::repository::uninstall_extension,
         ])
         .run(tauri::generate_context!())
         .expect("error while running luma-lite");

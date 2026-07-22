@@ -87,3 +87,34 @@ export interface ProviderDef {
   supportedTypes: string[];
   requiresApiKey: boolean;
 }
+
+export interface RepositorySource {
+  url: string;
+  label?: string;
+  lastFetched?: number;
+  lastError?: string;
+}
+
+export interface RepositoryExtensionView {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  author: string;
+  categories: string[];
+  manifestUrl: string;
+  verified: boolean;
+  installed: boolean;
+  installedVersion?: string;
+  repositoryUrl: string;
+  repositoryLabel?: string;
+}
+
+export interface ListRepositoriesResult {
+  repositories: RepositorySource[];
+}
+
+export interface ListRepositoryExtensionsResult {
+  extensions: RepositoryExtensionView[];
+  repositories: RepositorySource[];
+}

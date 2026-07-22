@@ -1432,6 +1432,188 @@ input {
   line-height: var(--leading-normal);
 }
 
+/* ── Extension Tabs ────────────────────────── */
+
+.extensions-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-4);
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: var(--sp-2);
+}
+
+.extensions-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.extensions-tab:hover {
+  color: var(--text-secondary);
+}
+
+.extensions-tab-active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.extensions-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: var(--weight-bold);
+  border-radius: var(--radius-full);
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.extensions-tab-active .extensions-tab-count {
+  background: var(--accent);
+  color: var(--surface-card);
+}
+
+/* ── Extension Actions Row ─────────────────── */
+
+.extension-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+/* ── Extension Verified Badge ──────────────── */
+
+.extension-verified {
+  color: var(--green);
+  font-size: var(--text-xs);
+}
+
+/* ── Small Button Variant ──────────────────── */
+
+.btn-sm {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+/* ── Repository Section ────────────────────── */
+
+.extensions-repos-section {
+  margin-bottom: var(--sp-6);
+}
+
+.extensions-repos-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--sp-3);
+}
+
+.extensions-section-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.extensions-section-empty {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  padding: var(--sp-4);
+  text-align: center;
+}
+
+.extensions-repos-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+
+.extensions-repo-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-3);
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.extensions-repo-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.extensions-repo-name {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.extensions-repo-meta {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.extensions-repo-actions {
+  display: flex;
+  gap: var(--sp-1);
+  flex-shrink: 0;
+}
+
+.extensions-add-repo {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+.extensions-add-repo-input {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: var(--text-xs);
+  background: var(--surface-input);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color var(--duration-normal) var(--ease-out);
+}
+
+.extensions-add-repo-input:focus {
+  border-color: var(--accent);
+}
+
+.extensions-add-repo-label {
+  max-width: 160px;
+}
+
+/* ── Browse Section ────────────────────────── */
+
+.extensions-browse-section {
+  margin-top: var(--sp-4);
+}
+
+.extensions-browse-section .extensions-section-title {
+  margin-bottom: var(--sp-3);
+}
+
 /* ── Appearance: Theme Cards ────────────────── */
 
 .theme-grid {

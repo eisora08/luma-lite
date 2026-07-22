@@ -138,6 +138,17 @@ pub fn do_scan_plugins(app_handle: Option<&tauri::AppHandle>) -> Result<Vec<Plug
 
         let enabled = read_plugin_enabled(&config_path);
 
+        // Detect source from extension-config.json
+        let source = if config_path.exists() {
+            fs::read_to_string(&config_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|v| v.get("source").and_then(|s| s.as_str()).map(String::from))
+                .unwrap_or_else(|| "local".into())
+        } else {
+            "local".into()
+        };
+
         let (cef_injection, inject_script, target_url) = match &manifest.activation {
             Some(a) => (
                 Some(a.cef_injection),
@@ -161,7 +172,7 @@ pub fn do_scan_plugins(app_handle: Option<&tauri::AppHandle>) -> Result<Vec<Plug
             description: manifest.description.unwrap_or_default(),
             author: manifest.author.unwrap_or_default(),
             enabled,
-            source: "local".into(),
+            source,
             has_detect: manifest.has_detect,
             script_path: if script_path.exists() {
                 Some(script_path.to_string_lossy().to_string())
@@ -215,6 +226,17 @@ fn build_plugin_from_disk(extension_id: &str) -> Option<PluginEntry> {
         None => (None, None, None),
     };
 
+    // Read source from extension-config.json instead of hardcoding "local"
+    let source = if config_path.exists() {
+        fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|v| v.get("source").and_then(|s| s.as_str()).map(String::from))
+            .unwrap_or_else(|| "local".into())
+    } else {
+        "local".into()
+    };
+
     Some(PluginEntry {
         id: extension_id.to_string(),
         name: m.name.unwrap_or_else(|| extension_id.to_string()),
@@ -222,7 +244,7 @@ fn build_plugin_from_disk(extension_id: &str) -> Option<PluginEntry> {
         description: m.description.unwrap_or_default(),
         author: m.author.unwrap_or_default(),
         enabled: read_plugin_enabled(&config_path),
-        source: "local".into(),
+        source,
         has_detect: m.has_detect,
         script_path: if script_path.exists() {
             Some(script_path.to_string_lossy().to_string())
@@ -330,7 +352,7 @@ fn activate_cef_injection(plugin: &PluginEntry) {
     super::steam_inject::start_target_monitor(plugin.id.clone(), target);
 }
 
-fn deactivate_cef_injection(plugin_id: &str) {
+pub(crate) fn deactivate_cef_injection(plugin_id: &str) {
     super::steam_inject::clear_injection(plugin_id);
     super::steam_inject::stop_target_monitor();
     eprintln!("[PLUGINS] Cleared CEF injection state for {plugin_id}");
@@ -377,35 +399,42 @@ pub fn toggle_plugin(
         .or_else(|| build_plugin_from_disk(&extension_id))
         .ok_or_else(|| format!("Plugin {extension_id} not found"))?;
 
-    // Write extension-config.json
+    // Read existing extension-config.json to preserve source/manifestUrl fields
     let plugins_dir = crate::config::resolve_plugins_dir();
     let config_path = plugins_dir
         .join(&extension_id)
         .join("extension-config.json");
 
-    if let Some(parent) = config_path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).map_err(|e| format!("Failed to create plugin dir: {e}"))?;
-        }
-    }
+    let existing_config: serde_json::Value = if config_path.exists() {
+        fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
 
-    let config = serde_json::json!({ "enabled": enabled });
-    fs::write(
-        &config_path,
-        serde_json::to_string_pretty(&config).unwrap_or_default(),
-    )
-    .map_err(|e| format!("Failed to write config: {e}"))?;
-
-    plugin.enabled = enabled;
-    cache.insert(extension_id.clone(), plugin.clone());
+    let _previous_enabled = existing_config
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // ------------------------------------------------------------------
-    // Invoke Lua lifecycle hooks
+    // Invoke Lua lifecycle hooks BEFORE persisting state
     // ------------------------------------------------------------------
+    let mut lifecycle_ok = true;
+    let mut lifecycle_error: Option<String> = None;
+
     if let Some(ref script_path) = plugin.script_path {
         let install_dir = crate::config::resolve_steam_root()
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                format!(
+                    "Steam root not detected. Cannot {} extension '{extension_id}'. \
+                     Set STEAM_PATH environment variable or configure Steam root in settings.",
+                    if enabled { "enable" } else { "disable" }
+                )
+            })?;
 
         match super::extension_lifecycle::load_extension(extension_id.clone(), script_path.clone())
         {
@@ -427,18 +456,51 @@ pub fn toggle_plugin(
                         eprintln!("[PLUGINS] Lua extension.{hook}({extension_id}) returned: {val}");
                     }
                     Err(e) => {
-                        eprintln!("[PLUGINS] Lua extension.{hook}({extension_id}) failed: {e}");
+                        eprintln!("[PLUGINS] Lua extension.{hook}({extension_id}) FAILED: {e}");
+                        lifecycle_ok = false;
+                        lifecycle_error = Some(e);
                     }
                 }
             }
             Err(e) => {
                 eprintln!("[PLUGINS] Failed to load Lua script for {extension_id}: {e}");
+                // Don't fail the toggle for missing Lua — CEF-only extensions
             }
         }
     }
 
+    // If lifecycle failed, do NOT persist the new state — return error
+    if !lifecycle_ok {
+        let err_msg = lifecycle_error.unwrap_or_else(|| "Lifecycle failed".into());
+        return Err(format!(
+            "Failed to {action} extension '{extension_id}': {err_msg}",
+            action = if enabled { "enable" } else { "disable" }
+        ));
+    }
+
     // ------------------------------------------------------------------
-    // CEF injection lifecycle
+    // Persist enabled state ONLY after lifecycle succeeds
+    // ------------------------------------------------------------------
+    if let Some(parent) = config_path.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create plugin dir: {e}"))?;
+        }
+    }
+
+    // Merge enabled state with existing config (preserve source, manifestUrl, etc.)
+    let mut merged_config = existing_config.clone();
+    merged_config["enabled"] = serde_json::json!(enabled);
+    fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&merged_config).unwrap_or_default(),
+    )
+    .map_err(|e| format!("Failed to write config: {e}"))?;
+
+    plugin.enabled = enabled;
+    cache.insert(extension_id.clone(), plugin.clone());
+
+    // ------------------------------------------------------------------
+    // CEF injection lifecycle (non-fatal — warn but don't fail the toggle)
     // ------------------------------------------------------------------
     eprintln!(
         "[PLUGIN_DIAG] Before CEF lifecycle '{}': enabled={}, cef_injection={:?}, inject_script={:?}, target_url={:?}",

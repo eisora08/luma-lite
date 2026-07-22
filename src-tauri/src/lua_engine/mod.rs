@@ -28,6 +28,7 @@ pub struct LuaFunctionResult {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LuaExtensionTable {
     pub id: Option<String>,
     pub name: Option<String>,
@@ -551,6 +552,10 @@ impl LuaEngine {
         install_dir: &str,
     ) -> Result<LuaFunctionResult, String> {
         self.instruction_count.store(0, Ordering::Relaxed);
+        eprintln!(
+            "[LUA_ENGINE] Calling '{}' with install_dir='{}'",
+            name, install_dir
+        );
 
         let globals = self.lua.globals();
         let ext_table: Table = globals
@@ -563,12 +568,41 @@ impl LuaEngine {
 
         let result: Value = func
             .call::<Value>(install_dir)
-            .map_err(|e| format!("Extension function '{}' failed: {}", name, e))?;
+            .map_err(|e| {
+                eprintln!(
+                    "[LUA_ENGINE] Function '{}' threw error: {}",
+                    name, e
+                );
+                format!("Extension function '{}' failed: {}", name, e)
+            })?;
 
         let json_value: serde_json::Value = match self.lua.from_value(result) {
             Ok(v) => v,
             Err(_) => serde_json::Value::Null,
         };
+
+        // Check if the Lua function returned { success = false, error = "..." }
+        let lua_success = json_value
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let lua_error = json_value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        if !lua_success {
+            let err_msg = lua_error.unwrap_or_else(|| "Lua function returned success=false".to_string());
+            eprintln!(
+                "[LUA_ENGINE] Function '{}' returned success=false: {}",
+                name, err_msg
+            );
+            return Ok(LuaFunctionResult {
+                success: false,
+                value: Some(json_value),
+                error: Some(err_msg),
+            });
+        }
 
         Ok(LuaFunctionResult {
             success: true,

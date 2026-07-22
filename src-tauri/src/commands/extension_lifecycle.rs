@@ -30,8 +30,15 @@ pub fn load_extension(
     extension_id: String,
     script_path: String,
 ) -> Result<serde_json::Value, String> {
+    eprintln!(
+        "[LIFECYCLE] load_extension({extension_id}, script_path='{script_path}')"
+    );
     let script = fs::read_to_string(&script_path)
         .map_err(|e| format!("Failed to read script {script_path}: {e}"))?;
+    eprintln!(
+        "[LIFECYCLE] Read {} bytes from {script_path}",
+        script.len()
+    );
 
     let mut engine = LuaEngine::new(LuaEngineConfig::default())
         .map_err(|e| format!("Engine init failed: {e}"))?;
@@ -43,7 +50,9 @@ pub fn load_extension(
     let value = serde_json::to_value(&table).map_err(|e| format!("Serialization error: {e}"))?;
 
     get_engines().insert(extension_id.clone(), engine);
-    eprintln!("[LUA_ENGINE] Loaded extension: {extension_id}");
+    eprintln!(
+        "[LIFECYCLE] Loaded extension: {extension_id}, meta={value}"
+    );
 
     Ok(value)
 }
@@ -58,7 +67,10 @@ pub fn call_extension_detect(
         format!("Extension {extension_id} not loaded — call load_extension first")
     })?;
     let result = engine.call_function("detect", &install_dir)?;
-    serde_json::to_value(&result).map_err(|e| format!("Serialization error: {e}"))
+    if !result.success {
+        return Err(result.error.unwrap_or_else(|| "detect() returned success=false".to_string()));
+    }
+    Ok(result.value.unwrap_or(serde_json::Value::Null))
 }
 
 #[tauri::command]
@@ -66,12 +78,22 @@ pub fn call_extension_install(
     extension_id: String,
     install_dir: String,
 ) -> Result<serde_json::Value, String> {
+    eprintln!(
+        "[LIFECYCLE] call_extension_install({extension_id}, install_dir='{install_dir}')"
+    );
     let engines = get_engines();
     let engine = engines
         .get(&extension_id)
         .ok_or_else(|| format!("Extension {extension_id} not loaded"))?;
     let result = engine.call_function("install", &install_dir)?;
-    serde_json::to_value(&result).map_err(|e| format!("Serialization error: {e}"))
+    eprintln!(
+        "[LIFECYCLE] install result: success={}, value={:?}, error={:?}",
+        result.success, result.value, result.error
+    );
+    if !result.success {
+        return Err(result.error.unwrap_or_else(|| "install() returned success=false".to_string()));
+    }
+    Ok(result.value.unwrap_or(serde_json::Value::Null))
 }
 
 #[tauri::command]
@@ -84,7 +106,10 @@ pub fn call_extension_enable(
         .get(&extension_id)
         .ok_or_else(|| format!("Extension {extension_id} not loaded"))?;
     let result = engine.call_function("enable", &install_dir)?;
-    serde_json::to_value(&result).map_err(|e| format!("Serialization error: {e}"))
+    if !result.success {
+        return Err(result.error.unwrap_or_else(|| "enable() returned success=false".to_string()));
+    }
+    Ok(result.value.unwrap_or(serde_json::Value::Null))
 }
 
 #[tauri::command]
@@ -97,7 +122,10 @@ pub fn call_extension_disable(
         .get(&extension_id)
         .ok_or_else(|| format!("Extension {extension_id} not loaded"))?;
     let result = engine.call_function("disable", &install_dir)?;
-    serde_json::to_value(&result).map_err(|e| format!("Serialization error: {e}"))
+    if !result.success {
+        return Err(result.error.unwrap_or_else(|| "disable() returned success=false".to_string()));
+    }
+    Ok(result.value.unwrap_or(serde_json::Value::Null))
 }
 
 #[tauri::command]
@@ -110,7 +138,10 @@ pub fn call_extension_uninstall(
         .get(&extension_id)
         .ok_or_else(|| format!("Extension {extension_id} not loaded"))?;
     let result = engine.call_function("uninstall", &install_dir)?;
-    serde_json::to_value(&result).map_err(|e| format!("Serialization error: {e}"))
+    if !result.success {
+        return Err(result.error.unwrap_or_else(|| "uninstall() returned success=false".to_string()));
+    }
+    Ok(result.value.unwrap_or(serde_json::Value::Null))
 }
 
 #[tauri::command]
