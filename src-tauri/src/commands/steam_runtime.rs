@@ -88,8 +88,6 @@ fn is_steam_running() -> bool {
 }
 
 fn current_runtime_status() -> SteamRuntimeStatus {
-    let cef_debug_port = super::steam_inject::detect_cef_debug_port();
-
     let cef_debug_port = super::steam_inject::detect_cef_debug_port_silent();
 
     let steam_running = is_steam_running();

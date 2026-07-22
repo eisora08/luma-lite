@@ -2,11 +2,12 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::fs;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
 
@@ -173,7 +174,62 @@ pub fn get_injected_target_ids(extension_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn read_discovery_port() -> Option<u16> {
+    let local_app_data = dirs::data_local_dir()?;
+    let discovery_path = local_app_data
+        .join("LumaForge")
+        .join("runtime")
+        .join("steam-cdp.json");
+
+    let content = fs::read_to_string(&discovery_path).ok()?;
+
+    let v: Value = serde_json::from_str(&content).ok()?;
+
+    let schema = v.get("schemaVersion").and_then(|s| s.as_u64())?;
+    if schema != 1 {
+        return None;
+    }
+
+    let port = v.get("port").and_then(|p| p.as_u64())? as u16;
+    if port < 1024 {
+        return None;
+    }
+
+    let updated_at = v.get("updatedAt").and_then(|p| p.as_u64())?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+
+    if now.saturating_sub(updated_at) > 120 {
+        return None;
+    }
+
+    Some(port)
+}
+
 fn detect_cef_debug_port_internal(log_result: bool) -> Option<u16> {
+    if let Some(port) = read_discovery_port() {
+        let url = format!("http://127.0.0.1:{port}/json");
+        if let Ok(client) = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_millis(350))
+            .timeout(Duration::from_millis(350))
+            .build()
+        {
+            if let Ok(resp) = client.get(&url).send() {
+                if resp.status().is_success() {
+                    if log_result {
+                        eprintln!("[CEF_INJECT] Detected CEF debugger via discovery JSON on port {port}");
+                    }
+                    return Some(port);
+                }
+            }
+        }
+        if log_result {
+            eprintln!("[CEF_INJECT] Discovery port {port} reported but not responding, falling back to scan");
+        }
+    }
+
     let client = match reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_millis(350))
         .timeout(Duration::from_millis(350))

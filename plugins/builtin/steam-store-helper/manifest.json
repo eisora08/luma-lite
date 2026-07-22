@@ -1,10 +1,38 @@
 {
+  "schemaVersion": 1,
   "id": "steam-store-helper",
-  "name": "Steam Store Helper",
-  "version": "2.4.3",
-  "description": "Browse and download Steam package files through the LumaForge extension system.",
+  "name": "steam-store-helper",
+  "displayName": "Steam Store Package Helper",
+  "description": "Injects asset download controls directly into the official Steam Store action bar via standalone WebSockets.",
+  "version": "1.0.0",
+  "managedFiles": [],
+  "summary": "Asset download controls on every Steam Store game page",
   "author": "LumaForge",
-  "hasDetect": false,
+  "license": "MIT",
+  "permissions": [
+    {
+      "id": "network.http",
+      "reason": "Notify the local LumaForge backend when the user clicks download"
+    },
+    {
+      "id": "steam.cef_inject",
+      "reason": "Inject the action-bar button into Steam's CEF browser tabs via CDP WebSocket"
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "launcher-integration",
+      "reason": "Adds a download button to the Steam Store action bar"
+    }
+  ],
+  "behavior": {
+    "modifiesStorePage": true
+  },
+  "metadata": {
+    "surfaces": [
+      "settings"
+    ]
+  },
   "activation": {
     "cefInjection": true,
     "injectScript": "inject.js",

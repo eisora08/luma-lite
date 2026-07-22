@@ -25,7 +25,7 @@ extension = {
     return {
       success = true,
       injectScript = "inject.js",
-      cefEndpoint = "http://127.0.0.1:8080/json",
+      cefEndpoint = nil,
       targetUrl = "/app/"
     }
   end,
