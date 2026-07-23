@@ -354,7 +354,7 @@ fn activate_cef_injection(plugin: &PluginEntry) {
 
 pub(crate) fn deactivate_cef_injection(plugin_id: &str) {
     super::steam_inject::clear_injection(plugin_id);
-    super::steam_inject::stop_target_monitor();
+    super::steam_inject::stop_target_monitor(plugin_id);
     eprintln!("[PLUGINS] Cleared CEF injection state for {plugin_id}");
 }
 

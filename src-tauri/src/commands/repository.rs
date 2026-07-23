@@ -885,9 +885,7 @@ pub fn install_repository_extension(
                     .to_string()
             })?;
 
-        eprintln!(
-            "[REPOSITORY_INSTALL] Steam root resolved: {steam_root}"
-        );
+        eprintln!("[REPOSITORY_INSTALL] Steam root resolved: {steam_root}");
 
         // 7a. Load extension into Lua engine
         eprintln!("[REPOSITORY_INSTALL] Loading lifecycle: {extension_id}");
@@ -1685,11 +1683,17 @@ mod tests {
             "must serialize as hasDetect, got: {value}"
         );
         assert!(
-            value.get("hasInstall").and_then(|v| v.as_bool()).unwrap_or(false),
+            value
+                .get("hasInstall")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             "hasInstall must be true"
         );
         assert!(
-            value.get("hasDetect").and_then(|v| v.as_bool()).unwrap_or(false),
+            value
+                .get("hasDetect")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             "hasDetect must be true"
         );
         assert!(
@@ -1719,8 +1723,14 @@ mod tests {
 
         let value = serde_json::to_value(&table).unwrap();
 
-        let has_install_camel = value.get("hasInstall").and_then(|v| v.as_bool()).unwrap_or(true);
-        let has_install_snake = value.get("has_install").and_then(|v| v.as_bool()).unwrap_or(false);
+        let has_install_camel = value
+            .get("hasInstall")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let has_install_snake = value
+            .get("has_install")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         assert!(
             !has_install_camel,
             "hasInstall should be false when has_install=false"

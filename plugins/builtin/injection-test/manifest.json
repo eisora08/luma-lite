@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "injection-test",
+  "name": "injection-test",
+  "displayName": "Injection Test Button",
+  "description": "Minimal CEF injection test — adds a visible floating button to the Steam Store.",
+  "version": "0.1.0",
+  "author": "LumaForge",
+  "license": "MIT",
+  "managedFiles": [],
+  "activation": {
+    "cefInjection": true,
+    "injectScript": "inject.js",
+    "targetUrl": "store.steampowered.com"
+  }
+}

@@ -566,15 +566,10 @@ impl LuaEngine {
             .get(name)
             .map_err(|_| format!("Extension does not define '{}' function", name))?;
 
-        let result: Value = func
-            .call::<Value>(install_dir)
-            .map_err(|e| {
-                eprintln!(
-                    "[LUA_ENGINE] Function '{}' threw error: {}",
-                    name, e
-                );
-                format!("Extension function '{}' failed: {}", name, e)
-            })?;
+        let result: Value = func.call::<Value>(install_dir).map_err(|e| {
+            eprintln!("[LUA_ENGINE] Function '{}' threw error: {}", name, e);
+            format!("Extension function '{}' failed: {}", name, e)
+        })?;
 
         let json_value: serde_json::Value = match self.lua.from_value(result) {
             Ok(v) => v,
@@ -592,7 +587,8 @@ impl LuaEngine {
             .map(|s| s.to_string());
 
         if !lua_success {
-            let err_msg = lua_error.unwrap_or_else(|| "Lua function returned success=false".to_string());
+            let err_msg =
+                lua_error.unwrap_or_else(|| "Lua function returned success=false".to_string());
             eprintln!(
                 "[LUA_ENGINE] Function '{}' returned success=false: {}",
                 name, err_msg

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tungstenite::stream::MaybeTlsStream;
@@ -196,10 +196,7 @@ fn read_discovery_port() -> Option<u16> {
     }
 
     let updated_at = v.get("updatedAt").and_then(|p| p.as_u64())?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_secs();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
 
     if now.saturating_sub(updated_at) > 120 {
         return None;
@@ -219,7 +216,9 @@ fn detect_cef_debug_port_internal(log_result: bool) -> Option<u16> {
             if let Ok(resp) = client.get(&url).send() {
                 if resp.status().is_success() {
                     if log_result {
-                        eprintln!("[CEF_INJECT] Detected CEF debugger via discovery JSON on port {port}");
+                        eprintln!(
+                            "[CEF_INJECT] Detected CEF debugger via discovery JSON on port {port}"
+                        );
                     }
                     return Some(port);
                 }
@@ -1641,15 +1640,22 @@ pub fn get_injection_status() -> Value {
 // Target monitor — polls /json for new CDP targets matching the extension
 // ---------------------------------------------------------------------------
 
-static CEF_MONITOR_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Per-plugin monitor stop flags. Each plugin gets its own AtomicBool so
+/// multiple monitors can run concurrently without interfering.
+static CEF_MONITORS: OnceLock<DashMap<String, Arc<AtomicBool>>> = OnceLock::new();
+
+fn get_monitors() -> &'static DashMap<String, Arc<AtomicBool>> {
+    CEF_MONITORS.get_or_init(DashMap::new)
+}
 
 pub fn start_target_monitor(extension_id: String, target_url: String) {
-    if CEF_MONITOR_RUNNING.swap(true, Ordering::SeqCst) {
-        eprintln!("[CEF_MONITOR] Already running, skipping start");
-        return;
+    let flag = Arc::new(AtomicBool::new(true));
+    let existing = get_monitors().insert(extension_id.clone(), flag.clone());
+    if existing.is_some() {
+        eprintln!("[CEF_MONITOR] Replacing existing monitor for '{extension_id}'");
     }
 
-    eprintln!("[CEF_MONITOR] Started for extension: {}", extension_id);
+    eprintln!("[CEF_MONITOR] Started for extension: {extension_id}");
 
     thread::spawn(move || {
         let client = match reqwest::blocking::Client::builder()
@@ -1659,12 +1665,12 @@ pub fn start_target_monitor(extension_id: String, target_url: String) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[CEF_MONITOR] Failed to create HTTP client: {e}");
-                CEF_MONITOR_RUNNING.store(false, Ordering::SeqCst);
+                get_monitors().remove(&extension_id);
                 return;
             }
         };
 
-        while CEF_MONITOR_RUNNING.load(Ordering::SeqCst) {
+        while flag.load(Ordering::SeqCst) {
             let debug_port = detect_cef_debug_port_silent();
 
             if let Some(port) = debug_port {
@@ -1853,8 +1859,11 @@ pub fn start_target_monitor(extension_id: String, target_url: String) {
     });
 }
 
-pub fn stop_target_monitor() {
-    CEF_MONITOR_RUNNING.store(false, Ordering::SeqCst);
+pub fn stop_target_monitor(extension_id: &str) {
+    if let Some((_, flag)) = get_monitors().remove(extension_id) {
+        flag.store(false, Ordering::SeqCst);
+        eprintln!("[CEF_MONITOR] Stopped for extension: {extension_id}");
+    }
 }
 
 #[cfg(test)]
@@ -1863,12 +1872,13 @@ mod tests {
 
     #[test]
     fn target_monitor_starts_and_stops() {
-        let was_running = CEF_MONITOR_RUNNING.load(Ordering::SeqCst);
-        if !was_running {
-            CEF_MONITOR_RUNNING.store(true, Ordering::SeqCst);
-            stop_target_monitor();
-            assert!(!CEF_MONITOR_RUNNING.load(Ordering::SeqCst));
-        }
+        let test_id = "test-monitor-lifecycle";
+        let flag = Arc::new(AtomicBool::new(true));
+        get_monitors().insert(test_id.to_string(), flag.clone());
+        assert!(flag.load(Ordering::SeqCst));
+        stop_target_monitor(test_id);
+        assert!(!flag.load(Ordering::SeqCst));
+        assert!(get_monitors().get(test_id).is_none());
     }
 
     #[test]
@@ -2022,9 +2032,11 @@ mod tests {
 
     #[test]
     fn monitor_stop_sets_flag() {
-        CEF_MONITOR_RUNNING.store(true, Ordering::SeqCst);
-        stop_target_monitor();
-        assert!(!CEF_MONITOR_RUNNING.load(Ordering::SeqCst));
+        let test_id = "test-monitor-stop";
+        let flag = Arc::new(AtomicBool::new(true));
+        get_monitors().insert(test_id.to_string(), flag.clone());
+        stop_target_monitor(test_id);
+        assert!(!flag.load(Ordering::SeqCst));
     }
 
     #[test]
