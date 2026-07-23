@@ -5,6 +5,5 @@ pub mod plugins;
 pub mod providers;
 pub mod repository;
 pub mod steam_bridge;
-pub mod steam_inject;
 pub mod steam_runtime;
 pub mod tray;

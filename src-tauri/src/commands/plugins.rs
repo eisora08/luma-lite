@@ -22,23 +22,6 @@ pub struct PluginEntry {
     pub has_detect: bool,
     pub script_path: Option<String>,
     pub manifest_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cef_injection: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub inject_script: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_url: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ManifestActivation {
-    #[serde(rename = "cefInjection", default)]
-    cef_injection: bool,
-    #[serde(rename = "injectScript")]
-    inject_script: Option<String>,
-    #[serde(rename = "targetUrl")]
-    target_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,7 +34,6 @@ struct PluginManifest {
     author: Option<String>,
     #[serde(default)]
     has_detect: bool,
-    activation: Option<ManifestActivation>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,19 +131,10 @@ pub fn do_scan_plugins(app_handle: Option<&tauri::AppHandle>) -> Result<Vec<Plug
             "local".into()
         };
 
-        let (cef_injection, inject_script, target_url) = match &manifest.activation {
-            Some(a) => (
-                Some(a.cef_injection),
-                a.inject_script.clone(),
-                a.target_url.clone(),
-            ),
-            None => (None, None, None),
-        };
-
         if id == "steam-store-helper" {
             eprintln!(
-                "[PLUGIN_DIAG] Scanned '{}': enabled={}, cef_injection={:?}, inject_script={:?}, target_url={:?}, manifest={}",
-                id, enabled, cef_injection, inject_script, target_url, manifest_path.display()
+                "[PLUGIN_DIAG] Scanned '{}': enabled={}, manifest={}",
+                id, enabled, manifest_path.display()
             );
         }
 
@@ -180,9 +153,6 @@ pub fn do_scan_plugins(app_handle: Option<&tauri::AppHandle>) -> Result<Vec<Plug
                 None
             },
             manifest_path: Some(manifest_path.to_string_lossy().to_string()),
-            cef_injection,
-            inject_script,
-            target_url,
         });
     }
 
@@ -217,15 +187,6 @@ fn build_plugin_from_disk(extension_id: &str) -> Option<PluginEntry> {
     let raw = fs::read_to_string(&manifest_path).ok()?;
     let m: PluginManifest = serde_json::from_str(&raw).ok()?;
 
-    let (cef_injection, inject_script, target_url) = match &m.activation {
-        Some(a) => (
-            Some(a.cef_injection),
-            a.inject_script.clone(),
-            a.target_url.clone(),
-        ),
-        None => (None, None, None),
-    };
-
     // Read source from extension-config.json instead of hardcoding "local"
     let source = if config_path.exists() {
         fs::read_to_string(&config_path)
@@ -252,110 +213,7 @@ fn build_plugin_from_disk(extension_id: &str) -> Option<PluginEntry> {
             None
         },
         manifest_path: Some(manifest_path.to_string_lossy().to_string()),
-        cef_injection,
-        inject_script,
-        target_url,
     })
-}
-
-// ---------------------------------------------------------------------------
-// CEF injection pipeline (called from toggle_plugin)
-// ---------------------------------------------------------------------------
-
-fn activate_cef_injection(plugin: &PluginEntry) {
-    if plugin.cef_injection != Some(true) {
-        eprintln!(
-            "[PLUGINS] Skipping CEF injection for '{}': cef_injection={:?}",
-            plugin.id, plugin.cef_injection
-        );
-        return;
-    }
-
-    let script_file = match &plugin.inject_script {
-        Some(script_file) if !script_file.trim().is_empty() => script_file.clone(),
-        _ => {
-            eprintln!(
-                "[PLUGINS] Skipping CEF injection for '{}': inject_script is missing",
-                plugin.id
-            );
-            return;
-        }
-    };
-
-    let target = plugin
-        .target_url
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "store.steampowered.com".to_string());
-
-    let script_path = match crate::config::resolve_inject_script(&plugin.id, &script_file) {
-        Some(path) => path,
-        None => {
-            eprintln!(
-                "[PLUGINS] Cannot resolve inject script '{}' for '{}'",
-                script_file, plugin.id
-            );
-            return;
-        }
-    };
-
-    let js_code = match fs::read_to_string(&script_path) {
-        Ok(code) => code,
-        Err(error) => {
-            eprintln!(
-                "[PLUGINS] Failed to read inject script {}: {error}",
-                script_path.display()
-            );
-            return;
-        }
-    };
-
-    eprintln!(
-        "[PLUGINS] Activating CEF injection for '{}' (target: '{}', script: {})",
-        plugin.id,
-        target,
-        script_path.display()
-    );
-
-    let skip = super::steam_inject::get_injected_target_ids(&plugin.id);
-    let result = super::steam_inject::inject_code_into_tabs(&target, &js_code, &skip);
-
-    if result.success && !result.injected_tab_urls.is_empty() {
-        super::steam_inject::track_injection(
-            &plugin.id,
-            &target,
-            &result.injected_target_ids,
-            &result.injected_tab_urls,
-            &std::iter::repeat(None)
-                .take(result.injected_target_ids.len())
-                .collect::<Vec<_>>(),
-            &std::iter::repeat(None)
-                .take(result.injected_target_ids.len())
-                .collect::<Vec<_>>(),
-        );
-
-        eprintln!(
-            "[PLUGINS] Injected {} into {} tab(s) for '{}'",
-            script_file,
-            result.injected_tab_urls.len(),
-            plugin.id
-        );
-    } else if let Some(error) = result.error.as_ref() {
-        eprintln!("[PLUGINS] CEF injection for '{}': {error}", plugin.id);
-    } else {
-        eprintln!(
-            "[PLUGINS] CEF injection for '{}': no matching tabs found ({} total tabs)",
-            plugin.id, result.tabs_found
-        );
-    }
-
-    super::steam_inject::start_target_monitor(plugin.id.clone(), target);
-}
-
-pub(crate) fn deactivate_cef_injection(plugin_id: &str) {
-    super::steam_inject::clear_injection(plugin_id);
-    super::steam_inject::stop_target_monitor(plugin_id);
-    eprintln!("[PLUGINS] Cleared CEF injection state for {plugin_id}");
 }
 
 // ---------------------------------------------------------------------------
@@ -498,20 +356,6 @@ pub fn toggle_plugin(
 
     plugin.enabled = enabled;
     cache.insert(extension_id.clone(), plugin.clone());
-
-    // ------------------------------------------------------------------
-    // CEF injection lifecycle (non-fatal — warn but don't fail the toggle)
-    // ------------------------------------------------------------------
-    eprintln!(
-        "[PLUGIN_DIAG] Before CEF lifecycle '{}': enabled={}, cef_injection={:?}, inject_script={:?}, target_url={:?}",
-        plugin.id, enabled, plugin.cef_injection, plugin.inject_script, plugin.target_url
-    );
-
-    if enabled {
-        activate_cef_injection(&plugin);
-    } else {
-        deactivate_cef_injection(&extension_id);
-    }
 
     let _ = app_handle.emit("plugin-toggled", &plugin);
 

@@ -1022,15 +1022,7 @@ pub fn uninstall_extension(
         return Err("Only repository extensions can be uninstalled through this interface".into());
     }
 
-    // 1. Disable CEF injection if active
-    let cache = super::plugins::get_plugins_cache();
-    if let Some(plugin) = cache.get(&extension_id) {
-        if plugin.enabled {
-            super::plugins::deactivate_cef_injection(&extension_id);
-        }
-    }
-
-    // 2. Execute uninstall lifecycle BEFORE deleting plugin directory
+    // 1. Execute uninstall lifecycle BEFORE deleting plugin directory
     let script_path = plugin_dir.join("extension.lua");
     if script_path.exists() {
         let script_str = script_path.to_string_lossy().to_string();
@@ -1070,7 +1062,7 @@ pub fn uninstall_extension(
     fs::remove_dir_all(&plugin_dir)
         .map_err(|e| format!("Failed to remove extension directory: {e}"))?;
 
-    cache.remove(&extension_id);
+    super::plugins::get_plugins_cache().remove(&extension_id);
     super::extension_lifecycle::clear_engine_cache();
 
     eprintln!("[REPOSITORY_UNINSTALL] Uninstalled extension '{extension_id}'");

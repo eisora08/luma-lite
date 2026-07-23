@@ -9,9 +9,6 @@ export interface PluginEntry {
   hasDetect: boolean;
   scriptPath: string | null;
   manifestPath: string | null;
-  cefInjection?: boolean;
-  injectScript?: string;
-  targetUrl?: string;
 }
 
 export interface SteamRootInfo {
@@ -56,12 +53,6 @@ export const DEFAULT_APPEARANCE: AppearanceSettings = {
   density: 'comfortable',
   reduceMotion: false,
 };
-
-export interface InjectionStatus {
-  targetUrl: string;
-  injectedTabs: number;
-  injectedUrls: string[];
-}
 
 export interface ProviderConfig {
   id: string;

@@ -1,14 +1,17 @@
 use serde::Serialize;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri_plugin_shell::ShellExt;
 
 const STEAM_EXIT_TIMEOUT_SECS: u64 = 30;
 const CEF_START_TIMEOUT_SECS: u64 = 45;
 const PROCESS_POLL_INTERVAL_MS: u64 = 500;
 const CEF_POLL_INTERVAL_MS: u64 = 750;
+const CEF_DEBUG_PORTS: &[u16] = &[8080, 8081, 8082, 8083, 9222];
+const HTTP_TIMEOUT_MS: u64 = 350;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -87,8 +90,105 @@ fn is_steam_running() -> bool {
     false
 }
 
+fn read_discovery_port() -> Option<u16> {
+    let local_app_data = dirs::data_local_dir()?;
+    let discovery_path = local_app_data
+        .join("LumaForge")
+        .join("runtime")
+        .join("steam-cdp.json");
+
+    let content = fs::read_to_string(&discovery_path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let schema = v.get("schemaVersion").and_then(|s| s.as_u64())?;
+    if schema != 1 {
+        return None;
+    }
+    let port = v.get("port").and_then(|p| p.as_u64())? as u16;
+    if port < 1024 {
+        return None;
+    }
+    let updated_at = v.get("updatedAt").and_then(|p| p.as_u64())?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    if now.saturating_sub(updated_at) > 120 {
+        return None;
+    }
+    Some(port)
+}
+
+fn detect_cef_debug_port_internal(log_result: bool) -> Option<u16> {
+    if let Some(port) = read_discovery_port() {
+        let url = format!("http://127.0.0.1:{port}/json");
+        if let Ok(client) = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_millis(HTTP_TIMEOUT_MS))
+            .timeout(Duration::from_millis(HTTP_TIMEOUT_MS))
+            .build()
+        {
+            if let Ok(resp) = client.get(&url).send() {
+                if resp.status().is_success() {
+                    if log_result {
+                        eprintln!("[CEF_DETECT] Detected CEF debugger via discovery JSON on port {port}");
+                    }
+                    return Some(port);
+                }
+            }
+        }
+        if log_result {
+            eprintln!("[CEF_DETECT] Discovery port {port} reported but not responding, falling back to scan");
+        }
+    }
+
+    let client = match reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_millis(HTTP_TIMEOUT_MS))
+        .timeout(Duration::from_millis(HTTP_TIMEOUT_MS))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            if log_result {
+                eprintln!("[CEF_DETECT] Failed to create CEF detection client: {error}");
+            }
+            return None;
+        }
+    };
+
+    for &port in CEF_DEBUG_PORTS {
+        let url = format!("http://127.0.0.1:{port}/json");
+        match client.get(&url).send() {
+            Ok(response) if response.status().is_success() => {
+                if log_result {
+                    eprintln!("[CEF_DETECT] Detected CEF debugger on port {port}");
+                }
+                return Some(port);
+            }
+            Ok(response) => {
+                if log_result {
+                    eprintln!("[CEF_DETECT] Port {port} responded with status {}", response.status());
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    if log_result {
+        eprintln!(
+            "[CEF_DETECT] No CEF debugger found on common ports: {}",
+            CEF_DEBUG_PORTS.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    None
+}
+
+fn detect_cef_debug_port() -> Option<u16> {
+    detect_cef_debug_port_internal(true)
+}
+
+fn detect_cef_debug_port_silent() -> Option<u16> {
+    detect_cef_debug_port_internal(false)
+}
+
 fn current_runtime_status() -> SteamRuntimeStatus {
-    let cef_debug_port = super::steam_inject::detect_cef_debug_port_silent();
+    let cef_debug_port = detect_cef_debug_port_silent();
 
     let steam_running = is_steam_running();
 
@@ -125,7 +225,7 @@ fn operation_result(
 fn launch_steam_process_with_cef() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
 
-    if super::steam_inject::detect_cef_debug_port().is_some() {
+    if detect_cef_debug_port().is_some() {
         eprintln!("[STEAM_RUNTIME] Steam CEF debugging is already active");
 
         return Ok(());
@@ -198,7 +298,7 @@ fn wait_for_cef_debugger(timeout: Duration) -> Result<u16, String> {
     let started_at = Instant::now();
 
     while started_at.elapsed() < timeout {
-        if let Some(port) = super::steam_inject::detect_cef_debug_port() {
+        if let Some(port) = detect_cef_debug_port() {
             eprintln!("[STEAM_RUNTIME] Steam CEF debugger ready on port {port}");
 
             return Ok(port);
@@ -255,7 +355,7 @@ fn request_normal_steam_exit(app_handle: &tauri::AppHandle) -> Result<(), String
 }
 
 fn start_steam_and_wait_for_cef() -> SteamRuntimeOperationResult {
-    if let Some(port) = super::steam_inject::detect_cef_debug_port() {
+    if let Some(port) = detect_cef_debug_port() {
         return operation_result(
             true,
             "ready",
@@ -295,7 +395,7 @@ fn start_steam_and_wait_for_cef() -> SteamRuntimeOperationResult {
 }
 
 fn restart_steam_and_wait_for_cef(app_handle: tauri::AppHandle) -> SteamRuntimeOperationResult {
-    if let Some(port) = super::steam_inject::detect_cef_debug_port() {
+    if let Some(port) = detect_cef_debug_port() {
         return operation_result(
             true,
             "ready",

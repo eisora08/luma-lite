@@ -2,95 +2,6 @@ mod commands;
 mod config;
 mod lua_engine;
 
-/// Boot-time re-injection: for each enabled extension with CEF injection,
-/// read the inject script from the resolved plugin path and inject into
-/// matching Steam browser tabs.
-fn re_inject_enabled_extensions(plugins: &[commands::plugins::PluginEntry]) {
-    for plugin in plugins {
-        if !plugin.enabled {
-            continue;
-        }
-        if plugin.cef_injection != Some(true) {
-            continue;
-        }
-        let inject_script = match &plugin.inject_script {
-            Some(s) => s.clone(),
-            None => continue,
-        };
-        let target_url = plugin
-            .target_url
-            .clone()
-            .unwrap_or_else(|| "store.steampowered.com".into());
-
-        // Use the canonical AppData resolver
-        let script_path = match config::resolve_inject_script(&plugin.id, &inject_script) {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "[BOOT] Inject script not found for '{}' in AppData",
-                    plugin.id
-                );
-                continue;
-            }
-        };
-
-        eprintln!("[PLUGIN_RUNTIME] Plugin ID: {}", plugin.id);
-        eprintln!(
-            "[PLUGIN_RUNTIME] Inject script from manifest: {}",
-            inject_script
-        );
-        eprintln!(
-            "[PLUGIN_RUNTIME] Resolved script path: {}",
-            script_path.display()
-        );
-        eprintln!(
-            "[PLUGIN_RUNTIME] Script size: {}",
-            std::fs::metadata(&script_path)
-                .map(|m| m.len())
-                .unwrap_or(0)
-        );
-
-        match std::fs::read_to_string(&script_path) {
-            Ok(js_code) => {
-                let result =
-                    commands::steam_inject::inject_code_into_tabs(&target_url, &js_code, &[]);
-
-                commands::steam_inject::track_injection(
-                    &plugin.id,
-                    &target_url,
-                    &result.injected_target_ids,
-                    &result.injected_tab_urls,
-                    &std::iter::repeat(None)
-                        .take(result.injected_target_ids.len())
-                        .collect::<Vec<_>>(),
-                    &std::iter::repeat(None)
-                        .take(result.injected_target_ids.len())
-                        .collect::<Vec<_>>(),
-                );
-
-                if result.success {
-                    eprintln!(
-                        "[BOOT] Injected into {} tab(s) for '{}'",
-                        result.injected_tab_urls.len(),
-                        plugin.id
-                    );
-                } else if let Some(ref error) = result.error {
-                    eprintln!("[BOOT] Initial injection for '{}': {error}", plugin.id);
-                }
-            }
-
-            Err(error) => {
-                eprintln!(
-                    "[BOOT] Failed to read inject script {}: {error}",
-                    script_path.display()
-                );
-            }
-        }
-
-        commands::steam_inject::start_target_monitor(plugin.id.clone(), target_url.clone());
-    }
-}
-
 /// Seed builtin plugins from the repository source into the AppData runtime directory.
 /// Idempotent: only copies when the runtime plugin directory is missing.
 fn seed_builtin_plugins(runtime_plugins_dir: &std::path::Path) {
@@ -204,7 +115,7 @@ pub fn run() {
                 plugins_dir.display()
             );
             seed_builtin_plugins(&plugins_dir);
-            let plugins = match commands::plugins::do_scan_plugins(None) {
+            let _plugins = match commands::plugins::do_scan_plugins(None) {
                 Ok(p) => {
                     if !p.is_empty() {
                         eprintln!(
@@ -223,16 +134,6 @@ pub fn run() {
 
             // Start the Steam CEF HTTP bridge
             commands::steam_bridge::start_steam_bridge(handle.clone());
-
-            // Wait for the bridge to be ready before reinjecting
-            eprintln!("[BOOT] Waiting for Steam bridge readiness");
-            let bridge_ready = commands::steam_bridge::wait_until_bridge_ready(5000);
-            if bridge_ready {
-                eprintln!("[BOOT] Steam bridge ready; injecting enabled extensions");
-                re_inject_enabled_extensions(&plugins);
-            } else {
-                eprintln!("[BOOT] Bridge was not ready; deferring enabled extension injection");
-            }
 
             // Initialize system tray
             commands::tray::init_system_tray(app)?;
@@ -257,10 +158,6 @@ pub fn run() {
             commands::steam_runtime::start_steam_with_cef,
             commands::steam_runtime::restart_steam_with_cef,
             commands::steam_runtime::request_steam_shutdown,
-            // CDP injection
-            commands::steam_inject::inject_to_steam_tab,
-            commands::steam_inject::inject_plugin_by_id,
-            commands::steam_inject::get_injection_status,
             // Extension file operations
             commands::extension::extension_file_exists,
             commands::extension::extension_file_status,
